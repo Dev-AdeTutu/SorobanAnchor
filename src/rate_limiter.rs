@@ -4,7 +4,9 @@
 //! to prevent spam and abuse of the contract.
 
 use soroban_sdk::{contracttype, Address, Env};
+use crate::deterministic_hash::make_storage_key;
 use crate::errors::{AnchorKitError, ErrorCode};
+extern crate alloc;
 
 /// Rate limit configuration stored in contract storage.
 ///
@@ -224,27 +226,21 @@ impl RateLimiter {
         current_ledger.saturating_sub(window_start_ledger) >= window_length
     }
     
-    /// Generate storage key for rate limit state
+    /// Generate collision-resistant storage key for per-attestor rate limit state.
     fn get_state_key(env: &Env, attestor: &Address) -> soroban_sdk::BytesN<32> {
-        // Use the address bytes directly as the key
-        // Convert address to bytes using its internal representation
-        // We use the address string representation and hash it
-        let address_str = attestor.to_string();
-        // Use env.crypto().sha256() to hash the address string
-        // Convert the string to bytes using copy_into_slice
-        let mut address_bytes = [0u8; 56]; // Stellar addresses are 56 characters
-        address_str.copy_into_slice(&mut address_bytes);
-        let bytes = soroban_sdk::Bytes::from_slice(env, &address_bytes);
-        let hash = env.crypto().sha256(&bytes);
-        // Convert Hash<32> to BytesN<32>
-        hash.into()
+        let addr_xdr = attestor.clone().to_xdr(env);
+        let mut addr_bytes = soroban_sdk::vec![env];
+        // collect xdr bytes into a plain slice via Bytes
+        let mut raw = alloc::vec::Vec::with_capacity(addr_xdr.len() as usize);
+        for i in 0..addr_xdr.len() {
+            raw.push(addr_xdr.get(i).unwrap_or(0));
+        }
+        make_storage_key(env, &[b"RL_STATE", &raw])
     }
-    
-    /// Generate storage key for rate limit config
+
+    /// Generate collision-resistant storage key for the global rate limit config.
     fn get_config_key(env: &Env) -> soroban_sdk::BytesN<32> {
-        // Use a fixed key for config (32 bytes)
-        let config_key = *b"rate_limit_config_______________";
-        soroban_sdk::BytesN::from_array(env, &config_key)
+        make_storage_key(env, &[b"RL_CONFIG"])
     }
 }
 

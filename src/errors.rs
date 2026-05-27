@@ -84,6 +84,10 @@ pub enum ErrorCode {
     SessionExpired            = 25,
     SessionClosed             = 26,
 
+    // Session / routing errors (27–30)
+    SessionOperationLimitExceeded = 27,
+    InvalidWeights                = 28,
+
     // Cache errors (48–49)
     CacheExpired              = 48,
     CacheNotFound             = 49,
@@ -133,7 +137,9 @@ impl ErrorCode {
             ErrorCode::NotInitialized            => "Contract is not initialized",
             ErrorCode::IllegalTransition         => "Illegal transaction state transition",
             ErrorCode::SessionExpired            => "Session has expired",
-            ErrorCode::SessionClosed             => "Session is closed",
+            ErrorCode::SessionClosed                  => "Session is closed",
+            ErrorCode::SessionOperationLimitExceeded   => "Session operation limit exceeded",
+            ErrorCode::InvalidWeights                  => "Routing weights must sum to 1.0",
             ErrorCode::CacheExpired              => "Cache entry has expired",
             ErrorCode::CacheNotFound             => "Cache entry not found",
         }
@@ -298,6 +304,8 @@ impl AnchorKitError {
     pub fn rate_limit_exceeded() -> Self { Self::from_code(ErrorCode::RateLimitExceeded) }
     pub fn session_expired() -> Self { Self::from_code(ErrorCode::SessionExpired) }
     pub fn session_closed() -> Self { Self::from_code(ErrorCode::SessionClosed) }
+    pub fn session_operation_limit_exceeded() -> Self { Self::from_code(ErrorCode::SessionOperationLimitExceeded) }
+    pub fn invalid_weights() -> Self { Self::from_code(ErrorCode::InvalidWeights) }
     pub fn cache_expired() -> Self { Self::from_code(ErrorCode::CacheExpired) }
     pub fn cache_not_found() -> Self { Self::from_code(ErrorCode::CacheNotFound) }
 
@@ -430,6 +438,8 @@ mod tests {
             ErrorCode::IllegalTransition,
             ErrorCode::SessionExpired,
             ErrorCode::SessionClosed,
+            ErrorCode::SessionOperationLimitExceeded,
+            ErrorCode::InvalidWeights,
             ErrorCode::CacheExpired,
             ErrorCode::CacheNotFound,
         ];

@@ -186,9 +186,15 @@ fn validate_host(host: &str) -> Result<(), AnchorKitError> {
         }
         
         // Label must start and end with alphanumeric
-        let first_char = label.chars().next().unwrap();
-        let last_char = label.chars().last().unwrap();
-        
+        let first_char = match label.chars().next() {
+            Some(c) => c,
+            None => return Err(AnchorKitError::invalid_endpoint_format()),
+        };
+        let last_char = match label.chars().last() {
+            Some(c) => c,
+            None => return Err(AnchorKitError::invalid_endpoint_format()),
+        };
+
         if !first_char.is_alphanumeric() || !last_char.is_alphanumeric() {
             return Err(AnchorKitError::invalid_endpoint_format());
         }
