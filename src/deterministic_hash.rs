@@ -7,6 +7,33 @@
 
 use soroban_sdk::{Address, Bytes, BytesN, Env, xdr::ToXdr};
 
+/// Compute a collision-resistant SHA-256 storage key from any XDR-encodable
+/// tuple. All persistent-storage key helpers must go through this function so
+/// that keys are deterministic and cannot collide across different namespaces.
+///
+/// # Arguments
+/// * `env`   - Soroban execution environment.
+/// * `parts` - Slice of raw byte segments that together identify the entry.
+///             Each segment is length-prefixed (4-byte BE) before hashing so
+///             that `["AB", "C"]` and `["A", "BC"]` produce different keys.
+///
+/// # Returns
+/// A 32-byte SHA-256 digest suitable for use as a persistent storage key.
+pub fn make_storage_key(env: &Env, parts: &[&[u8]]) -> BytesN<32> {
+    let mut input = Bytes::new(env);
+    for part in parts {
+        // 4-byte big-endian length prefix prevents cross-segment collisions.
+        let len = part.len() as u32;
+        for b in len.to_be_bytes().iter() {
+            input.push_back(*b);
+        }
+        for b in part.iter() {
+            input.push_back(*b);
+        }
+    }
+    env.crypto().sha256(&input)
+}
+
 /// Compute a canonical SHA-256 hash over attestation payload fields.
 ///
 /// The field ordering is fixed (canonical):

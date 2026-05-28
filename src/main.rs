@@ -134,7 +134,7 @@ fn stellar_invoke(
                "--"])
         .args(fn_args)
         .output()
-        .expect("failed to run stellar contract invoke — is the Stellar CLI installed?");
+        .unwrap_or_else(|e| { eprintln!("error: failed to run stellar contract invoke — is the Stellar CLI installed? ({e})"); std::process::exit(1); });
 
     if output.status.success() {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
@@ -422,7 +422,7 @@ fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
             "--no-default-features", "--features", "wasm",
         ])
         .status()
-        .expect("failed to run cargo build");
+        .unwrap_or_else(|e| { eprintln!("error: failed to run cargo build: {e}"); std::process::exit(1); });
     if !build.success() {
         eprintln!("WASM build failed");
         std::process::exit(1);
@@ -443,7 +443,7 @@ fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
             "--network-passphrase", &net_phrase,
         ])
         .output()
-        .expect("failed to run stellar contract upload — is the Stellar CLI installed?");
+        .unwrap_or_else(|e| { eprintln!("error: failed to run stellar contract upload — is the Stellar CLI installed? ({e})"); std::process::exit(1); });
 
     if !upload_output.status.success() {
         eprintln!("{}", String::from_utf8_lossy(&upload_output.stderr).trim());
@@ -499,7 +499,7 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
         .args(["build", "--release", "--target", "wasm32-unknown-unknown",
                "--no-default-features", "--features", "wasm"])
         .status()
-        .expect("failed to run cargo build");
+        .unwrap_or_else(|e| { eprintln!("error: failed to run cargo build: {e}"); std::process::exit(1); });
     if !build.success() { eprintln!("WASM build failed"); std::process::exit(1); }
 
     let wasm = "target/wasm32-unknown-unknown/release/anchorkit.wasm";
@@ -512,7 +512,7 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
                "--rpc-url", &net_url,
                "--network-passphrase", &net_phrase])
         .output()
-        .expect("failed to run stellar contract deploy — is the Stellar CLI installed?");
+        .unwrap_or_else(|e| { eprintln!("error: failed to run stellar contract deploy — is the Stellar CLI installed? ({e})"); std::process::exit(1); });
 
     if !output.status.success() {
         eprintln!("{}", String::from_utf8_lossy(&output.stderr).trim());
@@ -605,7 +605,7 @@ fn attest(
     network: &str, source: &str, issuer: &str, session_id: Option<u64>,
 ) {
     let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs().to_string();
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
 
     let session_str;
     let result = if let Some(sid) = session_id {
@@ -651,7 +651,10 @@ fn quote(from: &str, to: &str, amount: u64, contract_id: &str, network: &str, so
         eprintln!("note: could not parse quote as JSON, raw output:\n{raw}");
         std::process::exit(1);
     });
-    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    match serde_json::to_string_pretty(&out) {
+        Ok(s) => println!("{s}"),
+        Err(e) => { eprintln!("error: failed to serialize quote output: {e}"); std::process::exit(1); }
+    }
 }
 
 fn status(tx_id: &str, anchor_url: &str) {
@@ -680,7 +683,10 @@ fn status(tx_id: &str, anchor_url: &str) {
         amount_fee: tx.get("amount_fee").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()),
         message:    tx.get("message").and_then(|v| v.as_str()).map(|s| s.to_string()),
     };
-    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    match serde_json::to_string_pretty(&out) {
+        Ok(s) => println!("{s}"),
+        Err(e) => { eprintln!("error: failed to serialize status output: {e}"); std::process::exit(1); }
+    }
 }
 
 fn revoke(address: &str, contract_id: &str, network: &str, source: &str) {
@@ -754,7 +760,7 @@ fn check_wasm_target(fix: bool) -> CheckResult {
                 let install = std::process::Command::new("rustup")
                     .args(["target", "add", "wasm32-unknown-unknown"])
                     .status();
-                if install.is_ok() && install.unwrap().success() {
+                if install.map(|s| s.success()).unwrap_or(false) {
                     CheckResult::pass("wasm32-unknown-unknown target installed (auto-fixed)")
                 } else {
                     CheckResult::fail("wasm32-unknown-unknown target missing and auto-fix failed")
