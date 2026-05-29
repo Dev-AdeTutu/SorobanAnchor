@@ -185,6 +185,18 @@ JSON files are well-formed.
 make clean-dist   # removes dist/
 ```
 
+## Governance and Security
+
+SorobanAnchor follows a documented governance and security model covering:
+
+- **Roles** — Maintainers, Contributors, Security Reviewers, and on-chain Attestors.
+- **Contract upgrades** — Require two maintainer approvals, a reproducible WASM build, and a published SHA-256 checksum. Only the admin address recorded at contract initialization may authorize upgrades.
+- **Admin key management** — Multi-signature setup (2-of-N); keys are never committed to the repository; mainnet keys are stored on offline hardware wallets.
+- **Dependency auditing** — `cargo audit` runs in CI on every PR; all dependencies are pinned to exact versions and `Cargo.lock` is committed.
+- **Responsible disclosure** — Report vulnerabilities privately via GitHub's security advisory feature. We follow coordinated disclosure with a 14-day fix window.
+
+Full details: [`docs/governance-and-security.md`](docs/governance-and-security.md)
+
 ## License
 
 MIT

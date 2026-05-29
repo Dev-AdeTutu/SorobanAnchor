@@ -118,7 +118,10 @@ pub mod stellar_toml;
 
 pub use domain_validator::validate_anchor_domain;
 pub use errors::{AnchorKitError, ErrorCode};
-pub use stellar_toml::{ParsedCurrency, ParsedStellarToml, parse_stellar_toml, fetch_stellar_toml_url};
+pub use stellar_toml::{
+    ParsedCurrency, ParsedStellarToml, parse_stellar_toml, fetch_stellar_toml_url,
+    fetch_stellar_toml_with_retry, StellarTomlFetchConfig, StellarTomlFetchResult,
+};
 
 /// Backward-compatible alias. Prefer [`AnchorKitError`] for new code.
 pub use errors::Error;
