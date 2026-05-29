@@ -83,6 +83,10 @@ pub enum ErrorCode {
     IllegalTransition         = 24,
     SessionExpired            = 25,
     SessionClosed             = 26,
+    /// Caller is not the configured admin; upgrade/migration was rejected.
+    UnauthorizedUpgrade       = 27,
+    /// Upgrade payload is malformed (e.g. zero-length WASM hash).
+    InvalidUpgradePayload     = 28,
 
     // Cache errors (48–49)
     CacheExpired              = 48,
@@ -134,6 +138,8 @@ impl ErrorCode {
             ErrorCode::IllegalTransition         => "Illegal transaction state transition",
             ErrorCode::SessionExpired            => "Session has expired",
             ErrorCode::SessionClosed             => "Session is closed",
+            ErrorCode::UnauthorizedUpgrade       => "Caller is not authorized to perform upgrades",
+            ErrorCode::InvalidUpgradePayload     => "Upgrade payload is invalid or malformed",
             ErrorCode::CacheExpired              => "Cache entry has expired",
             ErrorCode::CacheNotFound             => "Cache entry not found",
         }
@@ -298,6 +304,8 @@ impl AnchorKitError {
     pub fn rate_limit_exceeded() -> Self { Self::from_code(ErrorCode::RateLimitExceeded) }
     pub fn session_expired() -> Self { Self::from_code(ErrorCode::SessionExpired) }
     pub fn session_closed() -> Self { Self::from_code(ErrorCode::SessionClosed) }
+    pub fn unauthorized_upgrade() -> Self { Self::from_code(ErrorCode::UnauthorizedUpgrade) }
+    pub fn invalid_upgrade_payload() -> Self { Self::from_code(ErrorCode::InvalidUpgradePayload) }
     pub fn cache_expired() -> Self { Self::from_code(ErrorCode::CacheExpired) }
     pub fn cache_not_found() -> Self { Self::from_code(ErrorCode::CacheNotFound) }
 
@@ -430,6 +438,8 @@ mod tests {
             ErrorCode::IllegalTransition,
             ErrorCode::SessionExpired,
             ErrorCode::SessionClosed,
+            ErrorCode::UnauthorizedUpgrade,
+            ErrorCode::InvalidUpgradePayload,
             ErrorCode::CacheExpired,
             ErrorCode::CacheNotFound,
         ];
@@ -448,6 +458,8 @@ mod tests {
         assert_eq!(ErrorCode::IllegalTransition     as u32, 24);
         assert_eq!(ErrorCode::SessionExpired        as u32, 25);
         assert_eq!(ErrorCode::SessionClosed         as u32, 26);
+        assert_eq!(ErrorCode::UnauthorizedUpgrade   as u32, 27);
+        assert_eq!(ErrorCode::InvalidUpgradePayload as u32, 28);
         assert_eq!(ErrorCode::CacheExpired          as u32, 48);
         assert_eq!(ErrorCode::CacheNotFound         as u32, 49);
     }

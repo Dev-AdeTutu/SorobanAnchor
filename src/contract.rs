@@ -412,6 +412,15 @@ struct TxStateChangedEvent {
     timestamp: u64,
 }
 
+#[contracttype]
+#[derive(Clone)]
+struct WebhookEvent {
+    event_type: String,
+    transaction_id: u64,
+    timestamp: u64,
+    payload_hash: Bytes,
+}
+
 // ---------------------------------------------------------------------------
 // TTLs (in ledgers)
 // ---------------------------------------------------------------------------
@@ -465,7 +474,18 @@ impl AnchorKitContract {
             panic_with_error!(&env, ErrorCode::AlreadyInitialized);
         }
         inst.set(&admin_key(&env), &admin);
+        // Explicit initialized flag — distinct from the admin key so callers can
+        // query initialization state without knowing the admin address.
+        inst.set(&symbol_short!("INITED"), &true);
         inst.extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
+    /// Returns `true` if the contract has been initialized, `false` otherwise.
+    pub fn is_initialized(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, bool>(&symbol_short!("INITED"))
+            .unwrap_or(false)
     }
 
     pub fn get_admin(env: Env) -> Address {
@@ -473,6 +493,116 @@ impl AnchorKitContract {
             .instance()
             .get::<_, Address>(&admin_key(&env))
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized))
+    }
+
+    // -----------------------------------------------------------------------
+    // Upgrade and migration (admin-only)
+    // -----------------------------------------------------------------------
+
+    /// Upgrade the contract WASM to a new version.
+    ///
+    /// # Authorization
+    /// Requires the stored admin to authorize this call.
+    ///
+    /// # Validation
+    /// - Contract must already be initialized.
+    /// - `new_wasm_hash` must be exactly 32 bytes (SHA-256 of the new WASM).
+    ///
+    /// # Panics
+    /// - [`ErrorCode::NotInitialized`] if the contract has not been initialized.
+    /// - [`ErrorCode::UnauthorizedUpgrade`] if the caller is not the admin.
+    /// - [`ErrorCode::InvalidUpgradePayload`] if `new_wasm_hash` is not 32 bytes.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        // Contract must be initialized before it can be upgraded.
+        if !env
+            .storage()
+            .instance()
+            .get::<_, bool>(&symbol_short!("INITED"))
+            .unwrap_or(false)
+        {
+            panic_with_error!(&env, ErrorCode::NotInitialized);
+        }
+        // Only the stored admin may authorize an upgrade.
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&admin_key(&env))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized));
+        admin.require_auth();
+
+        // Validate payload: BytesN<32> is always 32 bytes by type, but we
+        // additionally reject an all-zero hash as a sentinel for "no payload".
+        let zero: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
+        if new_wasm_hash == zero {
+            panic_with_error!(&env, ErrorCode::InvalidUpgradePayload);
+        }
+
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    /// Migrate contract state to a new schema version.
+    ///
+    /// This is a lightweight migration hook that records the target schema
+    /// version in instance storage. Callers can extend this function with
+    /// field-level migrations as the contract evolves.
+    ///
+    /// # Authorization
+    /// Requires the stored admin to authorize this call.
+    ///
+    /// # Validation
+    /// - Contract must already be initialized.
+    /// - `target_version` must be greater than the currently stored version.
+    ///
+    /// # Panics
+    /// - [`ErrorCode::NotInitialized`] if the contract has not been initialized.
+    /// - [`ErrorCode::UnauthorizedUpgrade`] if the caller is not the admin.
+    /// - [`ErrorCode::InvalidUpgradePayload`] if `target_version` is 0 or not
+    ///   strictly greater than the current schema version.
+    pub fn migrate(env: Env, target_version: u32) {
+        // Contract must be initialized before migration.
+        if !env
+            .storage()
+            .instance()
+            .get::<_, bool>(&symbol_short!("INITED"))
+            .unwrap_or(false)
+        {
+            panic_with_error!(&env, ErrorCode::NotInitialized);
+        }
+        // Only the stored admin may authorize a migration.
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&admin_key(&env))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized));
+        admin.require_auth();
+
+        // Reject zero or non-advancing version numbers.
+        if target_version == 0 {
+            panic_with_error!(&env, ErrorCode::InvalidUpgradePayload);
+        }
+        let current_version: u32 = env
+            .storage()
+            .instance()
+            .get::<_, u32>(&symbol_short!("SCHVER"))
+            .unwrap_or(0);
+        if target_version <= current_version {
+            panic_with_error!(&env, ErrorCode::InvalidUpgradePayload);
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("SCHVER"), &target_version);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
+    /// Return the current schema version (0 if no migration has been applied).
+    pub fn get_schema_version(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<_, u32>(&symbol_short!("SCHVER"))
+            .unwrap_or(0)
     }
 
     // -----------------------------------------------------------------------
@@ -2269,9 +2399,6 @@ pub fn is_attestor(env: Env, attestor: Address) -> bool {
     }
 
 
-        let limit = if max_results == 0 { 3u32 } else { max_results };
-        let mut result: Vec<Quote> = Vec::new(&env);
-        let mut taken = 0u32;
     // -----------------------------------------------------------------------
     // Anchor Info Discovery
     // -----------------------------------------------------------------------

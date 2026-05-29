@@ -179,6 +179,9 @@ mod sep10_test_util;
 mod sep10_contract_tests;
 
 #[cfg(test)]
+mod contract_init_upgrade_tests;
+
+#[cfg(test)]
 mod routing_tests;
 
 #[cfg(test)]
