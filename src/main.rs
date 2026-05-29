@@ -1,6 +1,31 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+// ── SecretKey wrapper ──────────────────────────────────────────────────────────
+
+/// Opaque wrapper around a Stellar secret key string.
+/// Does not implement Debug or Display to prevent accidental logging.
+struct SecretKey(String);
+
+impl SecretKey {
+    fn new(s: impl Into<String>) -> Self {
+        SecretKey(s.into())
+    }
+}
+
+impl std::ops::Deref for SecretKey {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for SecretKey {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_ref()
+    }
+}
+
 // ── Network profile management ────────────────────────────────────────────────
 
 #[derive(Serialize, serde::Deserialize, Clone, Debug)]
@@ -66,11 +91,20 @@ fn default_network() -> String {
         .unwrap_or_else(|| "testnet".to_string())
 }
 
-
+/// Return the contract ID to use, checking the per-command arg first, then
+/// the global flag / ANCHOR_CONTRACT_ID env var.  Exits with a clear error
+/// if neither is set.
+fn require_contract_id(global: Option<String>, local: Option<String>, command: &str) -> String {
+    local.or(global).unwrap_or_else(|| {
+        eprintln!("error: --contract-id (or ANCHOR_CONTRACT_ID) is required for `{command}`");
+        eprintln!("hint:  pass --contract-id <ID>  or  export ANCHOR_CONTRACT_ID=<ID>");
+        std::process::exit(1);
+    })
+}
 
 /// Resolve the signing source from flags or environment.
 /// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file > --credential-name
-fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credential_name: Option<&str>) -> String {
+fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credential_name: Option<&str>) -> SecretKey {
     if let Some(sk) = secret_key {
         return SecretKey::new(sk);
     }
@@ -99,7 +133,11 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credenti
             .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
         return keystore_get_decrypted(name, &password);
     }
-    eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, use --keypair-file, or use --credential-name");
+    eprintln!("error: signing key required — provide one of:");
+    eprintln!("  --secret-key <KEY>");
+    eprintln!("  export ANCHOR_ADMIN_SECRET=<KEY>");
+    eprintln!("  --keypair-file <PATH>");
+    eprintln!("  --credential-name <NAME>  (use: anchorkit credentials add --name <NAME>)");
     std::process::exit(1);
 }
 
@@ -134,6 +172,7 @@ fn stellar_invoke(
 ) -> String {
     let url = rpc_url_for(network);
     let phrase = passphrase_for(network);
+    let source: &str = source; // coerce &SecretKey → &str for uniform array element type
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
@@ -203,7 +242,7 @@ enum Commands {
     Register {
         #[arg(long)] address: String,
         #[arg(long, value_delimiter = ',')] services: Vec<String>,
-        #[arg(long)] contract_id: String,
+        #[arg(long)] contract_id: Option<String>,
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
@@ -216,7 +255,7 @@ enum Commands {
     Attest {
         #[arg(long)] subject: String,
         #[arg(long)] payload_hash: String,
-        #[arg(long)] contract_id: String,
+        #[arg(long)] contract_id: Option<String>,
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
@@ -233,7 +272,7 @@ enum Commands {
         #[arg(long)] to: String,
         /// Amount in base asset units
         #[arg(long)] amount: u64,
-        #[arg(long)] contract_id: String,
+        #[arg(long)] contract_id: Option<String>,
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
@@ -250,7 +289,7 @@ enum Commands {
     /// Revoke an attestor
     Revoke {
         #[arg(long)] address: String,
-        #[arg(long)] contract_id: String,
+        #[arg(long)] contract_id: Option<String>,
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
@@ -268,6 +307,8 @@ enum Commands {
         #[arg(long)]
         fix: bool,
     },
+    /// Show active environment: contract ID, network, profiles, and recent deployments
+    Env,
     /// Manage custom network profiles
     Network {
         #[command(subcommand)]
@@ -415,7 +456,7 @@ fn pre_deploy_validate(network: &str) -> bool {
 ///   2. Upload the WASM to the network and obtain its hash.
 ///   3. Call `upgrade(new_wasm_hash)` on the contract.
 ///   4. Call `migrate()` to apply any state-schema changes.
-fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
+fn upgrade_contract(contract_id: &str, network: &str, source: &SecretKey) {
     println!("\n🔍 Pre-upgrade validation ({network})...");
     if !pre_deploy_validate(network) {
         eprintln!("\n❌ Pre-upgrade validation failed. Aborting.");
@@ -444,11 +485,12 @@ fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
 
     // Upload WASM and capture the resulting hash.
     println!("Uploading WASM to {network}...");
+    let source_str: &str = source; // coerce &SecretKey → &str for uniform array element type
     let upload_output = std::process::Command::new("stellar")
         .args([
             "contract", "upload",
             "--wasm", wasm,
-            "--source", source,
+            "--source", source_str,
             "--rpc-url", &net_url,
             "--network-passphrase", &net_phrase,
         ])
@@ -834,10 +876,11 @@ fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
         .map(SecretKey::new)
         .unwrap_or_else(|| SecretKey::new("default"));
 
+    let source_str: &str = &*source; // coerce SecretKey → &str for uniform array element type
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
-               "--source", &source,
+               "--source", source_str,
                "--rpc-url", &rpc_url_for(network),
                "--network-passphrase", &passphrase_for(network),
                "--",
@@ -940,6 +983,51 @@ fn doctor(network: &str, fix: bool) {
             println!("Tip: Run with --fix to automatically resolve fixable issues.\n");
         }
         std::process::exit(1);
+    }
+}
+
+// ── Env command ───────────────────────────────────────────────────────────────
+
+fn env_info() {
+    println!("Active environment");
+    match std::env::var("ANCHOR_CONTRACT_ID").ok().filter(|s| !s.is_empty()) {
+        Some(id) => println!("  Contract ID : {} (from ANCHOR_CONTRACT_ID)", id),
+        None     => println!("  Contract ID : (not set — use --contract-id or export ANCHOR_CONTRACT_ID=<ID>)"),
+    }
+    let network_via_env = std::env::var("STELLAR_NETWORK").ok().filter(|s| !s.is_empty());
+    let active_network = network_via_env.as_deref()
+        .map(|s| s.to_string())
+        .unwrap_or_else(default_network);
+    let network_src = if network_via_env.is_some() { "(from STELLAR_NETWORK)" } else { "(default)" };
+    println!("  Network     : {} {}", active_network, network_src);
+
+    println!("\nNetwork profiles");
+    println!("  {:<16} {:<45} {}", "NAME", "RPC URL", "PASSPHRASE");
+    let builtins = [
+        ("testnet",   "https://soroban-testnet.stellar.org",  "Test SDF Network ; September 2015"),
+        ("mainnet",   "https://horizon.stellar.org",           "Public Global Stellar Network ; September 2015"),
+        ("futurenet", "https://rpc-futurenet.stellar.org",     "Test SDF Future Network ; October 2022"),
+    ];
+    for (name, url, phrase) in &builtins {
+        println!("  {:<16} {:<45} {} (built-in)", name, url, phrase);
+    }
+    for p in &load_network_profiles() {
+        let marker = if p.is_default { " (default)" } else { "" };
+        println!("  {:<16} {:<45} {}{}", p.name, p.rpc_url, p.network_passphrase, marker);
+    }
+
+    println!("\nRecent deployments (.anchorkit/deployments.json)");
+    let deployments = load_deployments();
+    if deployments.is_empty() {
+        println!("  (none)");
+    } else {
+        println!("  {:<52} {:<12} {:<14} {}", "CONTRACT ID", "NETWORK", "TIMESTAMP", "INIT");
+        for d in deployments.iter().rev().take(5) {
+            let display_id = &d.contract_id[..d.contract_id.len().min(52)];
+            println!("  {:<52} {:<12} {:<14} {}",
+                display_id, d.network, d.timestamp,
+                if d.initialized { "yes" } else { "no" });
+        }
     }
 }
 
@@ -1173,15 +1261,19 @@ fn credentials_remove(name: &str) {
 
 fn main() {
     let cli = Cli::parse();
-    let network = cli.network.unwrap_or_else(default_network);
+    let global_contract_id = cli.contract_id.clone();
+    let network = cli.network.unwrap_or_else(|| {
+        let n = default_network();
+        if std::env::var("STELLAR_NETWORK").is_err() && !load_network_profiles().iter().any(|p| p.is_default) {
+            eprintln!("note: STELLAR_NETWORK not set — using '{n}' (set STELLAR_NETWORK or: anchorkit network set-default --name <NAME>)");
+        }
+        n
+    });
     match cli.command {
         Commands::Deploy { network: cmd_net, source, admin, dry_run, list, upgrade, secret_key, keypair_file } => {
             let net = cmd_net;
             if upgrade {
-                let contract_id = cli.contract_id.unwrap_or_else(|| {
-                    eprintln!("error: --contract-id (or ANCHOR_CONTRACT_ID) is required for --upgrade");
-                    std::process::exit(1);
-                });
+                let contract_id = require_contract_id(global_contract_id, None, "deploy --upgrade");
                 let signing_source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), None);
                 upgrade_contract(&contract_id, &net, &signing_source);
             } else {
@@ -1189,27 +1281,34 @@ fn main() {
             }
         }
         Commands::Register { address, services, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, sep10_token, sep10_issuer } => {
+            let cid = require_contract_id(global_contract_id, contract_id, "register");
             let net = cmd_net;
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            register(&address, &services, &contract_id, &net, &source, &sep10_token, &sep10_issuer);
+            register(&address, &services, &cid, &net, &source, &sep10_token, &sep10_issuer);
         }
         Commands::Attest { subject, payload_hash, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, issuer, session_id } => {
+            let cid = require_contract_id(global_contract_id, contract_id, "attest");
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            attest(&subject, &payload_hash, &contract_id, &cmd_net, &source, &issuer, session_id);
+            attest(&subject, &payload_hash, &cid, &cmd_net, &source, &issuer, session_id);
         }
         Commands::Quote { from, to, amount, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
+            let cid = require_contract_id(global_contract_id, contract_id, "quote");
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            quote(&from, &to, amount, &contract_id, &cmd_net, &source);
+            quote(&from, &to, amount, &cid, &cmd_net, &source);
         }
         Commands::Status { tx_id, anchor_url } => {
             status(&tx_id, &anchor_url);
         }
         Commands::Revoke { address, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
+            let cid = require_contract_id(global_contract_id, contract_id, "revoke");
             let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            revoke(&address, &contract_id, &cmd_net, &source);
+            revoke(&address, &cid, &cmd_net, &source);
         }
         Commands::Doctor { fix } => {
             doctor(&network, fix);
+        }
+        Commands::Env => {
+            env_info();
         }
         Commands::Network { action } => {
             network_cmd(action);
