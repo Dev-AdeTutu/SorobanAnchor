@@ -1,3 +1,4 @@
+use anchorkit::normalize_stellar_account_id;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
@@ -97,6 +98,16 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credenti
     }
     eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, use --keypair-file, or use --credential-name");
     std::process::exit(1);
+}
+
+fn normalize_stellar_public_address(field: &str, address: &str) -> String {
+    match normalize_stellar_account_id(address) {
+        Ok(normalized) => normalized,
+        Err(err) => {
+            eprintln!("error: invalid {field}: {0}", err.message);
+            std::process::exit(1);
+        }
+    }
 }
 
 // ── RPC helpers ───────────────────────────────────────────────────────────────
@@ -534,7 +545,11 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
     };
 
     // Post-deployment initialization
-    let admin_addr = admin.unwrap_or(source);
+    let admin_addr = if let Some(value) = admin {
+        normalize_stellar_public_address("admin address", value)
+    } else {
+        source.to_string()
+    };
     println!("Initializing contract with admin {admin_addr}...");
     let init_result = std::process::Command::new("stellar")
         .args(["contract", "invoke",
@@ -582,19 +597,21 @@ fn register(
     address: &str, services: &[String], contract_id: &str,
     network: &str, source: &str, sep10_token: &str, sep10_issuer: &str,
 ) {
+    let address = normalize_stellar_public_address("attestor address", address);
+    let sep10_issuer = normalize_stellar_public_address("SEP-10 issuer address", sep10_issuer);
     let service_ids = parse_services(services)
         .iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
 
     stellar_invoke(contract_id, source, network, &[
         "register_attestor",
-        "--attestor", address,
+        "--attestor", &address,
         "--sep10_token", sep10_token,
-        "--sep10_issuer", sep10_issuer,
+        "--sep10_issuer", &sep10_issuer,
         "--public_key", "0000000000000000000000000000000000000000000000000000000000000000",
     ]);
     stellar_invoke(contract_id, source, network, &[
         "configure_services",
-        "--anchor", address,
+        "--anchor", &address,
         "--services", &service_ids,
     ]);
     println!("Attestor {address} registered and services configured.");
@@ -604,6 +621,8 @@ fn attest(
     subject: &str, payload_hash: &str, contract_id: &str,
     network: &str, source: &str, issuer: &str, session_id: Option<u64>,
 ) {
+    let subject = normalize_stellar_public_address("subject address", subject);
+    let issuer = normalize_stellar_public_address("issuer address", issuer);
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
 
@@ -613,7 +632,7 @@ fn attest(
         stellar_invoke(contract_id, source, network, &[
             "submit_attestation_with_session",
             "--session_id", &session_str,
-            "--issuer", issuer, "--subject", subject,
+            "--issuer", &issuer, "--subject", &subject,
             "--timestamp", &timestamp,
             "--payload_hash", payload_hash,
             "--signature", payload_hash,
@@ -621,7 +640,7 @@ fn attest(
     } else {
         stellar_invoke(contract_id, source, network, &[
             "submit_attestation",
-            "--issuer", issuer, "--subject", subject,
+            "--issuer", &issuer, "--subject", &subject,
             "--timestamp", &timestamp,
             "--payload_hash", payload_hash,
             "--signature", payload_hash,
@@ -690,9 +709,10 @@ fn status(tx_id: &str, anchor_url: &str) {
 }
 
 fn revoke(address: &str, contract_id: &str, network: &str, source: &str) {
+    let address = normalize_stellar_public_address("attestor address", address);
     stellar_invoke(contract_id, source, network, &[
         "revoke_attestor",
-        "--attestor", address,
+        "--attestor", &address,
     ]);
     println!("{{\"revoked\": true, \"address\": \"{address}\"}}");
 }

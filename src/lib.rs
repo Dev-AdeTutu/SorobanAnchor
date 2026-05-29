@@ -126,6 +126,7 @@ pub use rate_limiter::{RateLimiter, RateLimitConfig, RateLimitState};
 pub use response_validator::{
     validate_anchor_info_response, validate_deposit_response, validate_quote_response,
     validate_sep38_quote_response, validate_withdraw_response, validate_stellar_asset,
+    validate_stellar_account_id, normalize_stellar_account_id,
     AnchorInfoResponse, DepositResponse as ValidatorDepositResponse, QuoteResponse,
     Sep38QuoteResponse, WithdrawResponse,
 };
