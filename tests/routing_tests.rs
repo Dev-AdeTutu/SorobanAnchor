@@ -1,5 +1,8 @@
 #![cfg(test)]
 
+#[path = "sep10_test_util.rs"]
+mod sep10_test_util;
+
 mod routing_tests {
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
@@ -9,7 +12,7 @@ mod routing_tests {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
-    use crate::contract::{AnchorKitContract, AnchorKitContractClient, RoutingOptions, RoutingRequest};
+    use anchorkit::contract::{AnchorKitContract, AnchorKitContractClient, RoutingOptions, RoutingRequest};
     use crate::sep10_test_util::register_attestor_with_sep10;
 
     fn make_env() -> Env {
@@ -453,6 +456,163 @@ mod routing_tests {
         // weights sum to 1100 (not 1000) → should panic
         let result = client.try_route_anchors(&500u32, &400u32, &200u32, &3u32, &0u32);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Asset-support and service-advertisement validation (#238)
+    // -----------------------------------------------------------------------
+
+    fn register_anchor_with_services(
+        env: &Env,
+        client: &AnchorKitContractClient,
+        anchor: &Address,
+        svc: &[u32],
+    ) {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        register_attestor_with_sep10(env, client, anchor, anchor, &signing_key);
+        let mut services = Vec::new(env);
+        for &s in svc {
+            services.push_back(s);
+        }
+        client.configure_services(anchor, &services);
+    }
+
+    fn lowest_fee_options(env: &Env, base: &str, quote: &str, amount: u64) -> RoutingOptions {
+        let mut strategy = Vec::new(env);
+        strategy.push_back(Symbol::new(env, "LowestFee"));
+        RoutingOptions {
+            request: RoutingRequest {
+                base_asset: String::from_str(env, base),
+                quote_asset: String::from_str(env, quote),
+                amount,
+                operation_type: 1,
+            },
+            strategy,
+            min_reputation: 0,
+            max_anchors: 5,
+            require_kyc: false,
+            require_compliance: false,
+            subject: Address::generate(env),
+        }
+    }
+
+    /// An anchor whose only quote is for a different asset pair must be excluded,
+    /// even when its fee is lower than the matching anchor's.
+    #[test]
+    fn test_route_excludes_mismatched_asset_pair() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let matching = Address::generate(&env);
+        let mismatched = Address::generate(&env);
+        register_anchor(&env, &client, &matching);
+        register_anchor(&env, &client, &mismatched);
+        client.set_anchor_metadata(&matching, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+        client.set_anchor_metadata(&mismatched, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+
+        // matching: USD -> USDC, fee 50
+        client.submit_quote(
+            &matching,
+            &String::from_str(&env, "USD"),
+            &String::from_str(&env, "USDC"),
+            &10000u64, &50u32, &100u64, &100000u64, &1_003_600u64,
+        );
+        // mismatched: EUR -> USDC, fee 10 (lower, but wrong base asset)
+        client.submit_quote(
+            &mismatched,
+            &String::from_str(&env, "EUR"),
+            &String::from_str(&env, "USDC"),
+            &10000u64, &10u32, &100u64, &100000u64, &1_003_600u64,
+        );
+
+        let options = lowest_fee_options(&env, "USD", "USDC", 5000);
+        let best = client.route_transaction(&options);
+        assert_eq!(best.anchor, matching);
+    }
+
+    /// An anchor that does not advertise the quote service is excluded from
+    /// routing even if it has a matching, lower-fee quote stored.
+    #[test]
+    fn test_route_excludes_anchor_without_quote_service() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let with_quotes = Address::generate(&env);
+        let deposits_only = Address::generate(&env);
+        register_anchor(&env, &client, &with_quotes); // services [1, 3]
+        register_anchor_with_services(&env, &client, &deposits_only, &[1u32]); // deposits only
+        client.set_anchor_metadata(&with_quotes, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+        client.set_anchor_metadata(&deposits_only, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+
+        client.submit_quote(
+            &with_quotes,
+            &String::from_str(&env, "USD"),
+            &String::from_str(&env, "USDC"),
+            &10000u64, &50u32, &100u64, &100000u64, &1_003_600u64,
+        );
+        // deposits_only stores a cheaper matching quote, but advertises no quotes.
+        client.submit_quote(
+            &deposits_only,
+            &String::from_str(&env, "USD"),
+            &String::from_str(&env, "USDC"),
+            &10000u64, &5u32, &100u64, &100000u64, &1_003_600u64,
+        );
+
+        let options = lowest_fee_options(&env, "USD", "USDC", 5000);
+        let best = client.route_transaction(&options);
+        assert_eq!(best.anchor, with_quotes);
+    }
+
+    /// When no anchor advertises a quote for the requested pair, routing fails.
+    #[test]
+    fn test_route_no_matching_pair_errors() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let anchor = Address::generate(&env);
+        register_anchor(&env, &client, &anchor);
+        client.set_anchor_metadata(&anchor, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+        // A valid, in-limits, non-expired quote — excluded only by asset mismatch.
+        client.submit_quote(
+            &anchor,
+            &String::from_str(&env, "EUR"),
+            &String::from_str(&env, "GBP"),
+            &10000u64, &10u32, &100u64, &100000u64, &1_003_600u64,
+        );
+
+        let options = lowest_fee_options(&env, "USD", "USDC", 5000);
+        assert!(client.try_route_transaction(&options).is_err());
+    }
+
+    /// route_anchors must omit anchors that do not advertise the quote service.
+    #[test]
+    fn test_route_anchors_filters_non_quote_service() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let with_quotes = Address::generate(&env);
+        let deposits_only = Address::generate(&env);
+        register_anchor(&env, &client, &with_quotes);
+        register_anchor_with_services(&env, &client, &deposits_only, &[1u32]);
+
+        for anchor in [&with_quotes, &deposits_only] {
+            client.set_anchor_metadata(anchor, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+            client.submit_quote(
+                anchor,
+                &String::from_str(&env, "USD"),
+                &String::from_str(&env, "USDC"),
+                &10000u64, &25u32, &100u64, &100000u64, &1_003_600u64,
+            );
+        }
+
+        let results = client.route_anchors(&333u32, &333u32, &334u32, &5u32, &0u32);
+        // Only the quote-advertising anchor is ranked.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results.get(0).unwrap().anchor, with_quotes);
     }
 }
 

@@ -6,7 +6,9 @@ mod anchor_info_discovery_tests {
         Address, Env, String, Vec,
     };
 
-    use crate::contract::{AnchorKitContract, AnchorKitContractClient, AssetInfo, StellarToml};
+    use anchorkit::contract::{
+        AnchorKitContract, AnchorKitContractClient, AssetInfo, RefreshStatus, StellarToml,
+    };
 
     fn make_env() -> Env {
         let env = Env::default();
@@ -277,8 +279,13 @@ mod anchor_info_discovery_tests {
 
         client.refresh_anchor_info(&anchor);
 
-        let result = client.try_get_anchor_toml(&anchor);
-        assert!(result.is_err());
+        let toml = client.get_anchor_toml(&anchor);
+        assert_eq!(toml.version, String::from_str(&env, "2.0.0"));
+
+        let diagnostic =
+            client.get_refresh_diagnostic(&anchor, &String::from_str(&env, "anchor_info"));
+        assert_eq!(diagnostic.status, RefreshStatus::Failed);
+        assert!(diagnostic.had_cached_entry);
     }
 
     #[test]
@@ -392,5 +399,204 @@ mod anchor_info_discovery_tests {
         assert_eq!(dep_pct, 10);
         assert_eq!(wit_fixed, 50);
         assert_eq!(wit_pct, 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // #245 — fee and limit validation tests
+    // -----------------------------------------------------------------------
+
+    fn make_toml_with_asset(env: &Env, asset: AssetInfo) -> StellarToml {
+        let mut currencies = Vec::new(env);
+        currencies.push_back(asset);
+        let mut accounts = Vec::new(env);
+        accounts.push_back(String::from_str(env, "GANCHOR1"));
+        StellarToml {
+            version: String::from_str(env, "2.0.0"),
+            network_passphrase: String::from_str(env, "Test SDF Network ; September 2015"),
+            accounts,
+            signing_key: String::from_str(env, "GSIGN123"),
+            currencies,
+            transfer_server: String::from_str(env, "https://api.example.com"),
+            transfer_server_sep0024: String::from_str(env, "https://api.example.com/sep24"),
+            kyc_server: String::from_str(env, "https://kyc.example.com"),
+            web_auth_endpoint: String::from_str(env, "https://auth.example.com"),
+        }
+    }
+
+    /// deposit_fee_percent > 10_000 bps must be rejected.
+    #[test]
+    #[should_panic]
+    fn test_invalid_deposit_fee_percent_rejected() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        let bad_asset = AssetInfo {
+            code: String::from_str(&env, "USDC"),
+            issuer: String::from_str(&env, "GABC"),
+            deposit_enabled: true,
+            withdrawal_enabled: false,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 10_001, // > 100 %
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 100,
+            deposit_max_amount: 1_000,
+            withdrawal_min_amount: 0,
+            withdrawal_max_amount: 0,
+        };
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, bad_asset), &3600u64);
+    }
+
+    /// withdrawal_fee_percent > 10_000 bps must be rejected.
+    #[test]
+    #[should_panic]
+    fn test_invalid_withdrawal_fee_percent_rejected() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        let bad_asset = AssetInfo {
+            code: String::from_str(&env, "USDC"),
+            issuer: String::from_str(&env, "GABC"),
+            deposit_enabled: false,
+            withdrawal_enabled: true,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 0,
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 20_000, // > 100 %
+            deposit_min_amount: 0,
+            deposit_max_amount: 0,
+            withdrawal_min_amount: 100,
+            withdrawal_max_amount: 1_000,
+        };
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, bad_asset), &3600u64);
+    }
+
+    /// deposit_min_amount > deposit_max_amount (inverted range) must be rejected.
+    #[test]
+    #[should_panic]
+    fn test_inverted_deposit_limits_rejected() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        let bad_asset = AssetInfo {
+            code: String::from_str(&env, "USDC"),
+            issuer: String::from_str(&env, "GABC"),
+            deposit_enabled: true,
+            withdrawal_enabled: false,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 0,
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 5_000,
+            deposit_max_amount: 1_000, // min > max
+            withdrawal_min_amount: 0,
+            withdrawal_max_amount: 0,
+        };
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, bad_asset), &3600u64);
+    }
+
+    /// withdrawal_min_amount > withdrawal_max_amount must be rejected.
+    #[test]
+    #[should_panic]
+    fn test_inverted_withdrawal_limits_rejected() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        let bad_asset = AssetInfo {
+            code: String::from_str(&env, "USDC"),
+            issuer: String::from_str(&env, "GABC"),
+            deposit_enabled: false,
+            withdrawal_enabled: true,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 0,
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 0,
+            deposit_max_amount: 0,
+            withdrawal_min_amount: 9_000,
+            withdrawal_max_amount: 1_000, // min > max
+        };
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, bad_asset), &3600u64);
+    }
+
+    /// Empty currency code must be rejected.
+    #[test]
+    #[should_panic]
+    fn test_empty_currency_code_rejected() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        let bad_asset = AssetInfo {
+            code: String::from_str(&env, ""), // empty
+            issuer: String::from_str(&env, "GABC"),
+            deposit_enabled: true,
+            withdrawal_enabled: false,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 0,
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 100,
+            deposit_max_amount: 1_000,
+            withdrawal_min_amount: 0,
+            withdrawal_max_amount: 0,
+        };
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, bad_asset), &3600u64);
+    }
+
+    /// Currency code longer than 12 characters must be rejected.
+    #[test]
+    #[should_panic]
+    fn test_currency_code_too_long_rejected() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        let bad_asset = AssetInfo {
+            code: String::from_str(&env, "TOOLONGCODE123"), // 14 chars
+            issuer: String::from_str(&env, "GABC"),
+            deposit_enabled: true,
+            withdrawal_enabled: false,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 0,
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 100,
+            deposit_max_amount: 1_000,
+            withdrawal_min_amount: 0,
+            withdrawal_max_amount: 0,
+        };
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, bad_asset), &3600u64);
+    }
+
+    /// max_amount = 0 is treated as "unlimited" and must not trigger the inverted-range check.
+    #[test]
+    fn test_zero_max_amount_is_valid() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        let asset = AssetInfo {
+            code: String::from_str(&env, "USDC"),
+            issuer: String::from_str(&env, "GABC"),
+            deposit_enabled: true,
+            withdrawal_enabled: true,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 0,
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 100,
+            deposit_max_amount: 0, // 0 = unlimited
+            withdrawal_min_amount: 100,
+            withdrawal_max_amount: 0, // 0 = unlimited
+        };
+        // Must not panic
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, asset), &3600u64);
+        let info = client.get_anchor_asset_info(&anchor, &String::from_str(&env, "USDC"));
+        assert_eq!(info.deposit_max_amount, 0);
     }
 }

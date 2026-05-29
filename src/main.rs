@@ -1,70 +1,76 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-// ── Secret key wrapper ────────────────────────────────────────────────────────
+// ── Network profile management ────────────────────────────────────────────────
 
-/// A newtype wrapper around a Stellar secret key (S... string).
-///
-/// Implements `Debug` and `Display` with full redaction so the raw key value
-/// can never appear in log output, panic messages, or formatted strings.
-///
-/// # Safety
-/// The inner value is only accessible via [`SecretKey::expose`], which makes
-/// intentional use of the secret explicit at every call site.
-struct SecretKey(String);
-
-impl SecretKey {
-    fn new(raw: impl Into<String>) -> Self {
-        Self(raw.into())
-    }
-
-    /// Return the raw secret key value for use in subprocess arguments.
-    ///
-    /// Call sites must be deliberate: this is the only way to obtain the
-    /// plaintext key, and every call should be accompanied by a comment
-    /// explaining why the exposure is necessary.
-    fn expose(&self) -> &str {
-        &self.0
-    }
+#[derive(Serialize, serde::Deserialize, Clone, Debug)]
+struct NetworkProfile {
+    name: String,
+    rpc_url: String,
+    network_passphrase: String,
+    horizon_url: Option<String>,
+    #[serde(default)]
+    is_default: bool,
 }
 
-// Redact the secret in all formatted output.
-impl std::fmt::Debug for SecretKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SecretKey([REDACTED])")
-    }
+fn networks_path() -> std::path::PathBuf {
+    let dir = dirs_home().join(".anchorkit");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("networks.json")
 }
 
-impl std::fmt::Display for SecretKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[REDACTED]")
-    }
+fn dirs_home() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
-// Prevent accidental serialization of the secret key.
-impl Drop for SecretKey {
-    fn drop(&mut self) {
-        // Zero-fill the string's backing buffer before deallocation.
-        // SAFETY: We own the String and are about to drop it; writing zeros
-        // through the mutable byte slice is safe and prevents the key from
-        // lingering in freed heap memory.
-        unsafe {
-            let bytes = self.0.as_bytes_mut();
-            for b in bytes.iter_mut() {
-                std::ptr::write_volatile(b, 0u8);
-            }
-        }
-    }
+fn load_network_profiles() -> Vec<NetworkProfile> {
+    let path = networks_path();
+    if !path.exists() { return Vec::new(); }
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    serde_json::from_str(&content).unwrap_or_default()
 }
 
-// ── Key resolution ────────────────────────────────────────────────────────────
+fn save_network_profiles(profiles: &[NetworkProfile]) {
+    let path = networks_path();
+    let json = serde_json::to_string_pretty(profiles).unwrap_or_default();
+    std::fs::write(path, json).ok();
+}
+
+fn find_profile<'a>(profiles: &'a [NetworkProfile], name: &str) -> Option<&'a NetworkProfile> {
+    profiles.iter().find(|p| p.name == name)
+}
+
+fn rpc_url_for(network: &str) -> String {
+    let profiles = load_network_profiles();
+    if let Some(p) = find_profile(&profiles, network) {
+        return p.rpc_url.clone();
+    }
+    rpc_url(network).to_string()
+}
+
+fn passphrase_for(network: &str) -> String {
+    let profiles = load_network_profiles();
+    if let Some(p) = find_profile(&profiles, network) {
+        return p.network_passphrase.clone();
+    }
+    passphrase(network).to_string()
+}
+
+fn default_network() -> String {
+    let profiles = load_network_profiles();
+    profiles.iter()
+        .find(|p| p.is_default)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "testnet".to_string())
+}
+
+
 
 /// Resolve the signing source from flags or environment.
-/// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file
-///
-/// Returns a [`SecretKey`] wrapper that redacts the value in all debug/display
-/// output, preventing accidental logging of the raw secret.
-fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>) -> SecretKey {
+/// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file > --credential-name
+fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credential_name: Option<&str>) -> String {
     if let Some(sk) = secret_key {
         return SecretKey::new(sk);
     }
@@ -88,7 +94,12 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>) -> Secre
         }
         return SecretKey::new(raw.trim());
     }
-    eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, or use --keypair-file");
+    if let Some(name) = credential_name {
+        let password = rpassword::prompt_password("Keystore password: ")
+            .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
+        return keystore_get_decrypted(name, &password);
+    }
+    eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, use --keypair-file, or use --credential-name");
     std::process::exit(1);
 }
 
@@ -121,17 +132,18 @@ fn stellar_invoke(
     network: &str,
     fn_args: &[&str],
 ) -> String {
+    let url = rpc_url_for(network);
+    let phrase = passphrase_for(network);
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
-               // expose() is the only sanctioned way to obtain the raw key.
-               "--source", source.expose(),
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network),
+               "--source", source,
+               "--rpc-url", &url,
+               "--network-passphrase", &phrase,
                "--"])
         .args(fn_args)
         .output()
-        .expect("failed to run stellar contract invoke — is the Stellar CLI installed?");
+        .unwrap_or_else(|e| { eprintln!("error: failed to run stellar contract invoke — is the Stellar CLI installed? ({e})"); std::process::exit(1); });
 
     if output.status.success() {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
@@ -151,9 +163,9 @@ struct Cli {
     #[arg(long, global = true, env = "ANCHOR_CONTRACT_ID")]
     contract_id: Option<String>,
 
-    /// Stellar network: testnet | mainnet | futurenet (or set STELLAR_NETWORK)
-    #[arg(long, global = true, env = "STELLAR_NETWORK", default_value = "testnet")]
-    network: String,
+    /// Stellar network: testnet | mainnet | futurenet | <custom> (or set STELLAR_NETWORK)
+    #[arg(long, global = true, env = "STELLAR_NETWORK")]
+    network: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -176,6 +188,16 @@ enum Commands {
         /// List deployment history
         #[arg(long)]
         list: bool,
+        /// Upgrade an existing contract instead of deploying a new one.
+        /// Requires --contract-id (or ANCHOR_CONTRACT_ID) and --secret-key / ANCHOR_ADMIN_SECRET.
+        #[arg(long)]
+        upgrade: bool,
+        /// Secret key used to sign the upgrade transaction (overrides ANCHOR_ADMIN_SECRET)
+        #[arg(long)]
+        secret_key: Option<String>,
+        /// Path to a JSON or plain-text keypair file (used when --secret-key is absent)
+        #[arg(long)]
+        keypair_file: Option<String>,
     },
     /// Register an attestor
     Register {
@@ -185,6 +207,8 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
         #[arg(long)] sep10_token: String,
         #[arg(long)] sep10_issuer: String,
     },
@@ -196,6 +220,8 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
         #[arg(long)] issuer: String,
         #[arg(long)] session_id: Option<u64>,
     },
@@ -211,6 +237,8 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
     },
     /// Fetch SEP-6 transaction status from an anchor URL
     Status {
@@ -226,6 +254,13 @@ enum Commands {
         #[arg(long, default_value = "testnet")] network: String,
         #[arg(long)] secret_key: Option<String>,
         #[arg(long)] keypair_file: Option<String>,
+        /// Name of a credential stored in the keystore (alternative to --secret-key)
+        #[arg(long)] credential_name: Option<String>,
+    },
+    /// Manage stored credentials (encrypted secret keys)
+    Credentials {
+        #[command(subcommand)]
+        action: CredentialsAction,
     },
     /// Check environment setup
     Doctor {
@@ -233,11 +268,57 @@ enum Commands {
         #[arg(long)]
         fix: bool,
     },
+    /// Manage custom network profiles
+    Network {
+        #[command(subcommand)]
+        action: NetworkAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum NetworkAction {
+    /// Add a custom network profile
+    Add {
+        #[arg(long)] name: String,
+        #[arg(long)] rpc_url: String,
+        #[arg(long)] passphrase: String,
+        #[arg(long)] horizon_url: Option<String>,
+    },
+    /// List all configured network profiles
+    List,
+    /// Remove a custom network profile
+    Remove {
+        #[arg(long)] name: String,
+    },
+    /// Set the default network
+    SetDefault {
+        #[arg(long)] name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CredentialsAction {
+    /// Store an encrypted credential
+    Add {
+        #[arg(long)] name: String,
+        /// Secret key value (prompted if omitted)
+        #[arg(long)] value: Option<String>,
+    },
+    /// Retrieve and print a stored credential
+    Get {
+        #[arg(long)] name: String,
+    },
+    /// List all stored credential names
+    List,
+    /// Remove a stored credential
+    Remove {
+        #[arg(long)] name: String,
+    },
 }
 
 // ── Output types (JSON) ───────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 struct QuoteOutput {
     quote_id: u64,
     anchor: String,
@@ -327,6 +408,77 @@ fn pre_deploy_validate(network: &str) -> bool {
     ok
 }
 
+/// Upgrade an existing contract to a freshly-built WASM.
+///
+/// Steps:
+///   1. Build the WASM artifact.
+///   2. Upload the WASM to the network and obtain its hash.
+///   3. Call `upgrade(new_wasm_hash)` on the contract.
+///   4. Call `migrate()` to apply any state-schema changes.
+fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
+    println!("\n🔍 Pre-upgrade validation ({network})...");
+    if !pre_deploy_validate(network) {
+        eprintln!("\n❌ Pre-upgrade validation failed. Aborting.");
+        std::process::exit(1);
+    }
+    println!("✅ Validation passed.\n");
+
+    // Build WASM.
+    println!("Building WASM...");
+    let build = std::process::Command::new("cargo")
+        .args([
+            "build", "--release",
+            "--target", "wasm32-unknown-unknown",
+            "--no-default-features", "--features", "wasm",
+        ])
+        .status()
+        .unwrap_or_else(|e| { eprintln!("error: failed to run cargo build: {e}"); std::process::exit(1); });
+    if !build.success() {
+        eprintln!("WASM build failed");
+        std::process::exit(1);
+    }
+
+    let wasm = "target/wasm32-unknown-unknown/release/anchorkit.wasm";
+    let net_url = rpc_url_for(network);
+    let net_phrase = passphrase_for(network);
+
+    // Upload WASM and capture the resulting hash.
+    println!("Uploading WASM to {network}...");
+    let upload_output = std::process::Command::new("stellar")
+        .args([
+            "contract", "upload",
+            "--wasm", wasm,
+            "--source", source,
+            "--rpc-url", &net_url,
+            "--network-passphrase", &net_phrase,
+        ])
+        .output()
+        .unwrap_or_else(|e| { eprintln!("error: failed to run stellar contract upload — is the Stellar CLI installed? ({e})"); std::process::exit(1); });
+
+    if !upload_output.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&upload_output.stderr).trim());
+        std::process::exit(1);
+    }
+
+    let new_wasm_hash = String::from_utf8_lossy(&upload_output.stdout).trim().to_string();
+    println!("New WASM hash: {new_wasm_hash}");
+
+    // Call upgrade() on the contract.
+    println!("Calling upgrade() on contract {contract_id}...");
+    stellar_invoke(contract_id, source, network, &[
+        "upgrade",
+        "--new_wasm_hash", &new_wasm_hash,
+    ]);
+
+    // Call migrate() to apply state-schema changes (idempotent).
+    println!("Calling migrate() on contract {contract_id}...");
+    stellar_invoke(contract_id, source, network, &["migrate"]);
+
+    println!("✅ Contract upgraded successfully.");
+    println!("   Contract ID : {contract_id}");
+    println!("   New WASM    : {new_wasm_hash}");
+}
+
 fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list: bool) {
     // --list: print deployment history and exit
     if list {
@@ -357,21 +509,23 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
         .args(["build", "--release", "--target", "wasm32-unknown-unknown",
                "--no-default-features", "--features", "wasm"])
         .status()
-        .expect("failed to run cargo build");
+        .unwrap_or_else(|e| { eprintln!("error: failed to run cargo build: {e}"); std::process::exit(1); });
     if !build.success() { eprintln!("WASM build failed"); std::process::exit(1); }
 
     let wasm = "target/wasm32-unknown-unknown/release/anchorkit.wasm";
     println!("Deploying {wasm} to {network}...");
+    let net_url = rpc_url_for(network);
+    let net_phrase = passphrase_for(network);
     let output = std::process::Command::new("stellar")
         .args(["contract", "deploy", "--wasm", wasm,
                // SECURITY: `source` is a Stellar secret key required by the
                // Stellar CLI.  It is passed only as a subprocess argument and
                // is never echoed to stdout or included in log messages.
                "--source", source,
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network)])
+               "--rpc-url", &net_url,
+               "--network-passphrase", &net_phrase])
         .output()
-        .expect("failed to run stellar contract deploy — is the Stellar CLI installed?");
+        .unwrap_or_else(|e| { eprintln!("error: failed to run stellar contract deploy — is the Stellar CLI installed? ({e})"); std::process::exit(1); });
 
     if !output.status.success() {
         eprintln!("{}", String::from_utf8_lossy(&output.stderr).trim());
@@ -404,8 +558,8 @@ fn deploy(network: &str, source: &str, admin: Option<&str>, dry_run: bool, list:
                "--id", &contract_id,
                // SECURITY: `source` passed only as subprocess arg, not logged.
                "--source", source,
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network),
+               "--rpc-url", &net_url,
+               "--network-passphrase", &net_phrase,
                "--", "initialize",
                "--admin", admin_addr])
         .output();
@@ -471,7 +625,7 @@ fn attest(
     network: &str, source: &SecretKey, issuer: &str, session_id: Option<u64>,
 ) {
     let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs().to_string();
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
 
     // NOTE: `--signature` should be a real Ed25519 signature over the payload.
     // The placeholder below reuses `payload_hash` only for local/test use.
@@ -520,7 +674,10 @@ fn quote(from: &str, to: &str, amount: u64, contract_id: &str, network: &str, so
         eprintln!("note: could not parse quote as JSON, raw output:\n{raw}");
         std::process::exit(1);
     });
-    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    match serde_json::to_string_pretty(&out) {
+        Ok(s) => println!("{s}"),
+        Err(e) => { eprintln!("error: failed to serialize quote output: {e}"); std::process::exit(1); }
+    }
 }
 
 fn status(tx_id: &str, anchor_url: &str) {
@@ -549,7 +706,10 @@ fn status(tx_id: &str, anchor_url: &str) {
         amount_fee: tx.get("amount_fee").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()),
         message:    tx.get("message").and_then(|v| v.as_str()).map(|s| s.to_string()),
     };
-    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    match serde_json::to_string_pretty(&out) {
+        Ok(s) => println!("{s}"),
+        Err(e) => { eprintln!("error: failed to serialize status output: {e}"); std::process::exit(1); }
+    }
 }
 
 fn revoke(address: &str, contract_id: &str, network: &str, source: &SecretKey) {
@@ -623,7 +783,7 @@ fn check_wasm_target(fix: bool) -> CheckResult {
                 let install = std::process::Command::new("rustup")
                     .args(["target", "add", "wasm32-unknown-unknown"])
                     .status();
-                if install.is_ok() && install.unwrap().success() {
+                if install.map(|s| s.success()).unwrap_or(false) {
                     CheckResult::pass("wasm32-unknown-unknown target installed (auto-fixed)")
                 } else {
                     CheckResult::fail("wasm32-unknown-unknown target missing and auto-fix failed")
@@ -660,18 +820,8 @@ fn check_admin_secret_env() -> CheckResult {
 }
 
 fn check_network_connectivity(network: &str) -> CheckResult {
-    let url = rpc_url(network);
-    match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .and_then(|client| client.get(url).send())
-    {
-        Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
-            CheckResult::pass(format!("Network connectivity to {} OK", network))
-        }
-        Ok(resp) => CheckResult::warn(format!("Network {} responded with HTTP {}", network, resp.status())),
-        Err(e) => CheckResult::fail(format!("Cannot connect to {} network: {}", network, e)),
-    }
+    let url = rpc_url_for(network);
+    check_network_connectivity_url(&url)
 }
 
 fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
@@ -687,11 +837,9 @@ fn check_contract_deployment(contract_id: &str, network: &str) -> CheckResult {
     let output = std::process::Command::new("stellar")
         .args(["contract", "invoke",
                "--id", contract_id,
-               // SECURITY: expose() is the only sanctioned way to pass the key
-               // to the subprocess; it is never echoed to stdout or stderr.
-               "--source", source.expose(),
-               "--rpc-url", rpc_url(network),
-               "--network-passphrase", passphrase(network),
+               "--source", &source,
+               "--rpc-url", &rpc_url_for(network),
+               "--network-passphrase", &passphrase_for(network),
                "--",
                "get_attestor_count"])
         .output();
@@ -795,39 +943,292 @@ fn doctor(network: &str, fix: bool) {
     }
 }
 
+// ── Network command ───────────────────────────────────────────────────────────
+
+fn network_cmd(action: NetworkAction) {
+    match action {
+        NetworkAction::Add { name, rpc_url, passphrase, horizon_url } => {
+            // Validate RPC URL connectivity before saving
+            let check = check_network_connectivity_url(&rpc_url);
+            if !check.passed {
+                eprintln!("error: RPC URL validation failed: {}", check.message);
+                std::process::exit(1);
+            }
+            let mut profiles = load_network_profiles();
+            if find_profile(&profiles, &name).is_some() {
+                eprintln!("error: network '{}' already exists. Remove it first.", name);
+                std::process::exit(1);
+            }
+            profiles.push(NetworkProfile {
+                name: name.clone(),
+                rpc_url,
+                network_passphrase: passphrase,
+                horizon_url,
+                is_default: false,
+            });
+            save_network_profiles(&profiles);
+            println!("Network '{}' added.", name);
+        }
+        NetworkAction::List => {
+            let profiles = load_network_profiles();
+            // Always show built-ins
+            let builtins = [
+                ("testnet",   "https://soroban-testnet.stellar.org",  "Test SDF Network ; September 2015"),
+                ("mainnet",   "https://horizon.stellar.org",           "Public Global Stellar Network ; September 2015"),
+                ("futurenet", "https://rpc-futurenet.stellar.org",     "Test SDF Future Network ; October 2022"),
+            ];
+            println!("{:<16} {:<45} {}", "NAME", "RPC URL", "PASSPHRASE");
+            for (name, url, phrase) in &builtins {
+                println!("{:<16} {:<45} {} (built-in)", name, url, phrase);
+            }
+            for p in &profiles {
+                let default_marker = if p.is_default { " (default)" } else { "" };
+                println!("{:<16} {:<45} {}{}", p.name, p.rpc_url, p.network_passphrase, default_marker);
+            }
+        }
+        NetworkAction::Remove { name } => {
+            let mut profiles = load_network_profiles();
+            let before = profiles.len();
+            profiles.retain(|p| p.name != name);
+            if profiles.len() == before {
+                eprintln!("error: network '{}' not found.", name);
+                std::process::exit(1);
+            }
+            save_network_profiles(&profiles);
+            println!("Network '{}' removed.", name);
+        }
+        NetworkAction::SetDefault { name } => {
+            let mut profiles = load_network_profiles();
+            // Allow setting built-in names as default (stored as a marker profile)
+            let found = profiles.iter().any(|p| p.name == name);
+            if !found {
+                // Check if it's a built-in
+                let builtins = ["testnet", "mainnet", "futurenet"];
+                if !builtins.contains(&name.as_str()) {
+                    eprintln!("error: network '{}' not found.", name);
+                    std::process::exit(1);
+                }
+            }
+            for p in &mut profiles {
+                p.is_default = p.name == name;
+            }
+            save_network_profiles(&profiles);
+            println!("Default network set to '{}'.", name);
+        }
+    }
+}
+
+fn check_network_connectivity_url(url: &str) -> CheckResult {
+    match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .and_then(|client| client.get(url).send())
+    {
+        Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 404 => {
+            CheckResult::pass(format!("RPC URL {} reachable", url))
+        }
+        Ok(resp) => CheckResult::warn(format!("RPC URL {} responded with HTTP {}", url, resp.status())),
+        Err(e) => CheckResult::fail(format!("Cannot connect to {}: {}", url, e)),
+    }
+}
+
+// ── Keystore (AES-256-GCM encrypted credential store) ─────────────────────────
+
+use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+use aes_gcm::aead::rand_core::RngCore;
+use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+
+fn keystore_path() -> std::path::PathBuf {
+    let dir = dirs_home().join(".anchorkit");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("credentials.json")
+}
+
+fn keystore_load() -> std::collections::HashMap<String, String> {
+    let path = keystore_path();
+    if !path.exists() { return std::collections::HashMap::new(); }
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+fn keystore_save(store: &std::collections::HashMap<String, String>) {
+    let path = keystore_path();
+    let json = serde_json::to_string_pretty(store).unwrap_or_default();
+    std::fs::write(path, json).ok();
+}
+
+/// Derive a 32-byte key from password using Argon2id with a fixed salt derived from the name.
+fn derive_key(password: &str, name: &str) -> [u8; 32] {
+    let salt_raw = format!("anchorkit-{name}");
+    let salt_padded = format!("{:>22}", &salt_raw[..salt_raw.len().min(22)]);
+    let salt = SaltString::from_b64(&base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        salt_padded.as_bytes(),
+    )).unwrap_or_else(|_| SaltString::generate(&mut rand::thread_rng()));
+    let argon2 = Argon2::default();
+    let hash = argon2.hash_password(password.as_bytes(), &salt)
+        .unwrap_or_else(|e| { eprintln!("error: key derivation failed: {e}"); std::process::exit(1); });
+    let hash_bytes = hash.hash.unwrap();
+    let mut key = [0u8; 32];
+    let bytes = hash_bytes.as_bytes();
+    key[..bytes.len().min(32)].copy_from_slice(&bytes[..bytes.len().min(32)]);
+    key
+}
+
+fn keystore_encrypt(password: &str, name: &str, plaintext: &str) -> String {
+    use aes_gcm::aead::generic_array::GenericArray;
+    let key_bytes = derive_key(password, name);
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&key_bytes));
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes())
+        .unwrap_or_else(|e| { eprintln!("error: encryption failed: {e}"); std::process::exit(1); });
+    // Store as base64(nonce) + "." + base64(ciphertext)
+    use base64::Engine;
+    format!(
+        "{}.{}",
+        base64::engine::general_purpose::STANDARD.encode(nonce_bytes),
+        base64::engine::general_purpose::STANDARD.encode(ciphertext),
+    )
+}
+
+fn keystore_decrypt(password: &str, name: &str, stored: &str) -> Result<String, String> {
+    use aes_gcm::aead::generic_array::GenericArray;
+    use base64::Engine;
+    let parts: Vec<&str> = stored.splitn(2, '.').collect();
+    if parts.len() != 2 {
+        return Err("invalid stored credential format".to_string());
+    }
+    let nonce_bytes = base64::engine::general_purpose::STANDARD.decode(parts[0])
+        .map_err(|e| format!("base64 decode nonce: {e}"))?;
+    let ciphertext = base64::engine::general_purpose::STANDARD.decode(parts[1])
+        .map_err(|e| format!("base64 decode ciphertext: {e}"))?;
+    let key_bytes = derive_key(password, name);
+    let cipher = Aes256Gcm::new(GenericArray::from_slice(&key_bytes));
+    let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+    let plaintext = cipher.decrypt(nonce, ciphertext.as_ref())
+        .map_err(|_| "decryption failed — wrong password?".to_string())?;
+    String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))
+}
+
+fn keystore_get_decrypted(name: &str, password: &str) -> String {
+    let store = keystore_load();
+    let stored = store.get(name)
+        .unwrap_or_else(|| { eprintln!("error: credential '{}' not found", name); std::process::exit(1); });
+    keystore_decrypt(password, name, stored)
+        .unwrap_or_else(|e| { eprintln!("error: failed to decrypt credential: {e}"); std::process::exit(1); })
+}
+
+fn credentials_add(name: &str, value: Option<&str>) {
+    let secret = match value {
+        Some(v) => v.to_string(),
+        None => rpassword::prompt_password("Secret key value: ")
+            .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); }),
+    };
+    let password = rpassword::prompt_password("Keystore password: ")
+        .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+    let confirm = rpassword::prompt_password("Confirm password: ")
+        .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+    if password != confirm {
+        eprintln!("error: passwords do not match");
+        std::process::exit(1);
+    }
+    let encrypted = keystore_encrypt(&password, name, &secret);
+    let mut store = keystore_load();
+    store.insert(name.to_string(), encrypted);
+    keystore_save(&store);
+    println!("Credential '{}' stored.", name);
+}
+
+fn credentials_get(name: &str) {
+    let password = rpassword::prompt_password("Keystore password: ")
+        .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
+    let secret = keystore_get_decrypted(name, &password);
+    println!("{secret}");
+}
+
+fn credentials_list() {
+    let store = keystore_load();
+    if store.is_empty() {
+        println!("No credentials stored.");
+    } else {
+        for name in store.keys() {
+            println!("{name}");
+        }
+    }
+}
+
+fn credentials_remove(name: &str) {
+    let mut store = keystore_load();
+    if store.remove(name).is_none() {
+        eprintln!("error: credential '{}' not found", name);
+        std::process::exit(1);
+    }
+    keystore_save(&store);
+    println!("Credential '{}' removed.", name);
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
     let cli = Cli::parse();
+    let network = cli.network.unwrap_or_else(default_network);
     match cli.command {
-        Commands::Deploy { source, admin, dry_run, list } => {
-            // `source` is a Stellar CLI key alias (e.g. "default") or a raw
-            // secret key supplied via --source.  Wrap it in SecretKey so it
-            // is redacted if it ever appears in a formatted string.
-            let source_key = SecretKey::new(&source);
-            deploy(&cli.network, source_key.expose(), admin.as_deref(), dry_run, list);
+        Commands::Deploy { network: cmd_net, source, admin, dry_run, list, upgrade, secret_key, keypair_file } => {
+            let net = cmd_net;
+            if upgrade {
+                let contract_id = cli.contract_id.unwrap_or_else(|| {
+                    eprintln!("error: --contract-id (or ANCHOR_CONTRACT_ID) is required for --upgrade");
+                    std::process::exit(1);
+                });
+                let signing_source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), None);
+                upgrade_contract(&contract_id, &net, &signing_source);
+            } else {
+                deploy(&net, &source, admin.as_deref(), dry_run, list);
+            }
         }
-        Commands::Register { address, services, contract_id, network, secret_key, keypair_file, sep10_token, sep10_issuer } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
-            register(&address, &services, &contract_id, &network, &source, &sep10_token, &sep10_issuer);
+        Commands::Register { address, services, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, sep10_token, sep10_issuer } => {
+            let net = cmd_net;
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
+            register(&address, &services, &contract_id, &net, &source, &sep10_token, &sep10_issuer);
         }
-        Commands::Attest { subject, payload_hash, contract_id, network, secret_key, keypair_file, issuer, session_id } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
-            attest(&subject, &payload_hash, &contract_id, &network, &source, &issuer, session_id);
+        Commands::Attest { subject, payload_hash, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, issuer, session_id } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
+            attest(&subject, &payload_hash, &contract_id, &cmd_net, &source, &issuer, session_id);
         }
-        Commands::Quote { from, to, amount, contract_id, network, secret_key, keypair_file } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
-            quote(&from, &to, amount, &contract_id, &network, &source);
+        Commands::Quote { from, to, amount, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
+            quote(&from, &to, amount, &contract_id, &cmd_net, &source);
         }
         Commands::Status { tx_id, anchor_url } => {
             status(&tx_id, &anchor_url);
         }
-        Commands::Revoke { address, contract_id, network, secret_key, keypair_file } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref());
-            revoke(&address, &contract_id, &network, &source);
+        Commands::Revoke { address, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
+            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
+            revoke(&address, &contract_id, &cmd_net, &source);
         }
         Commands::Doctor { fix } => {
-            doctor(&cli.network, fix);
+            doctor(&network, fix);
+        }
+        Commands::Network { action } => {
+            network_cmd(action);
+        }
+        Commands::Credentials { action } => {
+            match action {
+                CredentialsAction::Add { name, value } => {
+                    credentials_add(&name, value.as_deref());
+                }
+                CredentialsAction::Get { name } => {
+                    credentials_get(&name);
+                }
+                CredentialsAction::List => {
+                    credentials_list();
+                }
+                CredentialsAction::Remove { name } => {
+                    credentials_remove(&name);
+                }
+            }
         }
     }
 }

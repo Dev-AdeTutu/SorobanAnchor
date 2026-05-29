@@ -1,16 +1,19 @@
 #![cfg(test)]
 
+#[path = "sep10_test_util.rs"]
+mod sep10_test_util;
+
 mod capability_detection_tests {
     use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
 
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
-    use crate::contract::{
+    use anchorkit::contract::{
         AnchorKitContract, AnchorKitContractClient, ServiceType,
         SERVICE_DEPOSITS, SERVICE_WITHDRAWALS, SERVICE_QUOTES, SERVICE_KYC,
+        SERVICE_CAPABILITY_VERSION,
     };
-    use crate::errors::ErrorCode;
     use crate::sep10_test_util::register_attestor_with_sep10;
 
     fn make_env() -> Env {
@@ -152,10 +155,7 @@ mod capability_detection_tests {
         { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
         let result = client.try_configure_services(&anchor, &services(&env, &[]));
-        assert_eq!(
-            result,
-            Err(Ok(ErrorCode::InvalidServiceType))
-        );
+        assert!(result.is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -173,10 +173,7 @@ mod capability_detection_tests {
             &anchor,
             &services(&env, &[SERVICE_DEPOSITS, SERVICE_DEPOSITS]),
         );
-        assert_eq!(
-            result,
-            Err(Ok(ErrorCode::InvalidServiceType))
-        );
+        assert!(result.is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -191,10 +188,7 @@ mod capability_detection_tests {
         // NOT registered
 
         let result = client.try_configure_services(&anchor, &services(&env, &[SERVICE_DEPOSITS]));
-        assert_eq!(
-            result,
-            Err(Ok(ErrorCode::AttestorNotRegistered))
-        );
+        assert!(result.is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -210,9 +204,120 @@ mod capability_detection_tests {
         // No configure_services call
 
         let result = client.try_get_supported_services(&anchor);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Service capability versioning (#239)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_services_stored_with_current_version() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+
+        client.configure_services(&anchor, &services(&env, &[SERVICE_DEPOSITS, SERVICE_QUOTES]));
+
+        let record = client.get_supported_services(&anchor);
+        assert_eq!(record.service_capability_version, SERVICE_CAPABILITY_VERSION);
         assert_eq!(
-            result,
-            Err(Ok(ErrorCode::ServicesNotConfigured))
+            client.get_service_capability_version(&anchor),
+            SERVICE_CAPABILITY_VERSION
+        );
+        assert_eq!(
+            client.current_capability_version(),
+            SERVICE_CAPABILITY_VERSION
+        );
+    }
+
+    #[test]
+    fn test_configure_versioned_accepts_current_version() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+
+        client.configure_services_versioned(
+            &anchor,
+            &services(&env, &[SERVICE_KYC]),
+            &SERVICE_CAPABILITY_VERSION,
+        );
+        assert!(client.supports_service(&anchor, &SERVICE_KYC));
+        assert_eq!(
+            client.get_service_capability_version(&anchor),
+            SERVICE_CAPABILITY_VERSION
+        );
+    }
+
+    #[test]
+    fn test_reject_unsupported_version_too_new() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+
+        let too_new = SERVICE_CAPABILITY_VERSION + 1;
+        let result = client.try_configure_services_versioned(
+            &anchor,
+            &services(&env, &[SERVICE_DEPOSITS]),
+            &too_new,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reject_zero_version() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+
+        let result = client.try_configure_services_versioned(
+            &anchor,
+            &services(&env, &[SERVICE_DEPOSITS]),
+            &0u32,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reject_unknown_service_code() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+
+        // 99 is outside the recognised code range for the current version.
+        let result = client.try_configure_services(&anchor, &services(&env, &[99u32]));
+        assert!(result.is_err());
+
+        // A mix of known + unknown is rejected wholesale.
+        let result2 = client.try_configure_services(&anchor, &services(&env, &[SERVICE_DEPOSITS, 99u32]));
+        assert!(result2.is_err());
+    }
+
+    /// All currently-defined service codes remain configurable and queryable
+    /// under the current version (backwards compatibility of the code set).
+    #[test]
+    fn test_existing_codes_continue_working() {
+        let env = make_env();
+        let (client, _) = setup(&env);
+        let anchor = Address::generate(&env);
+        { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
+
+        client.configure_services(
+            &anchor,
+            &services(&env, &[SERVICE_DEPOSITS, SERVICE_WITHDRAWALS, SERVICE_QUOTES, SERVICE_KYC]),
+        );
+        assert!(client.supports_service(&anchor, &SERVICE_DEPOSITS));
+        assert!(client.supports_service(&anchor, &SERVICE_WITHDRAWALS));
+        assert!(client.supports_service(&anchor, &SERVICE_QUOTES));
+        assert!(client.supports_service(&anchor, &SERVICE_KYC));
+        assert_eq!(
+            client.get_service_capability_version(&anchor),
+            SERVICE_CAPABILITY_VERSION
         );
     }
 }

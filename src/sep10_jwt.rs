@@ -3,12 +3,11 @@
 //! Verifies the anchor-signed token using a 32-byte Ed25519 public key stored on-chain.
 //! Payload must include integer `exp` (Unix seconds) and string `sub` (Stellar strkey of the client).
 
-#![cfg_attr(not(test), no_std)]
-
 extern crate alloc;
 
 use alloc::vec::Vec;
-use soroban_sdk::{Bytes, Env, String};
+use core::convert::TryInto;
+use soroban_sdk::{Bytes, BytesN, Env, String};
 
 /// Default maximum JWT character length. Can be overridden via contract storage key "JWTMAXLEN".
 pub const MAX_JWT_LEN: u32 = 2048;
@@ -171,6 +170,28 @@ fn parse_json_jti(payload: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// Parse first `"iss":"..."` string value. Returns `None` if absent.
+fn parse_json_iss(payload: &[u8]) -> Option<Vec<u8>> {
+    let key = b"\"iss\":";
+    let pos = find_bytes(payload, key)?;
+    let mut i = pos + key.len();
+    while i < payload.len() && payload[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= payload.len() || payload[i] != b'"' {
+        return None;
+    }
+    i += 1;
+    let start = i;
+    while i < payload.len() {
+        if payload[i] == b'"' {
+            return Some(payload[start..i].to_vec());
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Parse first `"sub":"..."` string value (no escape sequences inside value).
 fn parse_json_sub(env: &Env, payload: &[u8]) -> Result<String, ()> {
     let key = b"\"sub\":";
@@ -298,6 +319,13 @@ pub fn verify_sep10_jwt(
     if !contains_subslice(&header_dec, b"EdDSA") {
         return Err(());
     }
+    // Reject tokens that claim a non-EdDSA algorithm alongside EdDSA (e.g. "alg":"RS256")
+    // by requiring the header to NOT contain any of the common non-EdDSA algorithm names.
+    for forbidden in &[b"RS256" as &[u8], b"RS384", b"RS512", b"HS256", b"HS384", b"HS512", b"ES256", b"ES384", b"ES512", b"none"] {
+        if contains_subslice(&header_dec, forbidden) {
+            return Err(());
+        }
+    }
 
     let sig_dec = base64url_decode(sig_b64).map_err(|_| ())?;
     if sig_dec.len() != 64 {
@@ -307,12 +335,9 @@ pub fn verify_sep10_jwt(
     let signing_input = Bytes::from_slice(env, &buf[..d1]);
     let sig_bytes = Bytes::from_slice(env, sig_dec.as_slice());
 
-    if !env
-        .crypto()
-        .ed25519_verify(anchor_public_key, &signing_input, &sig_bytes)
-    {
-        return Err(());
-    }
+    let pk: BytesN<32> = anchor_public_key.clone().try_into().map_err(|_| ())?;
+    let sig: BytesN<64> = sig_bytes.clone().try_into().map_err(|_| ())?;
+    env.crypto().ed25519_verify(&pk, &signing_input, &sig);
 
     let payload_dec = base64url_decode(payload_b64).map_err(|_| ())?;
     let exp = parse_json_exp(&payload_dec)?;
@@ -366,6 +391,12 @@ pub fn verify_sep10_jwt(
         }
     }
 
+    // iss claim must be present and non-empty (SEP-10 requirement)
+    match parse_json_iss(&payload_dec) {
+        Some(iss) if !iss.is_empty() => {}
+        _ => return Err(()),
+    }
+
     Ok(())
 }
 
@@ -374,6 +405,8 @@ mod tests {
     extern crate std;
 
     use super::*;
+    use std::string::ToString;
+    use std::format;
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
     use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
@@ -392,10 +425,14 @@ mod tests {
         });
     }
 
+    fn make_contract_id(env: &Env) -> Address {
+        env.register_contract(None, crate::contract::AnchorKitContract)
+    }
+
     fn build_jwt(signing_key: &SigningKey, sub: &str, exp: u64) -> std::string::String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
-        let payload = format!(r#"{{"sub":"{}","exp":{}}}"#, sub, exp);
+        let payload = format!(r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com"}}"#, sub, exp);
         let header_b64 = URL_SAFE_NO_PAD.encode(header);
         let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
         let signing_input = format!("{}.{}", header_b64, payload_b64);
@@ -413,7 +450,7 @@ mod tests {
     ) -> std::string::String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
-        let mut payload = format!(r#"{{"sub":"{}","exp":{}"#, sub, exp);
+        let mut payload = format!(r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com""#, sub, exp);
         if let Some(n) = nbf {
             payload.push_str(&format!(r#","nbf":{}"#, n));
         }
@@ -421,6 +458,30 @@ mod tests {
             payload.push_str(&format!(r#","jti":"{}""#, j));
         }
         payload.push('}');
+        let header_b64 = URL_SAFE_NO_PAD.encode(header);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
+        let signing_input = format!("{}.{}", header_b64, payload_b64);
+        let sig = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        format!("{}.{}", signing_input, sig_b64)
+    }
+
+    fn build_jwt_with_alg(signing_key: &SigningKey, alg: &str, sub: &str, exp: u64) -> std::string::String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = format!(r#"{{"alg":"{}","typ":"JWT"}}"#, alg);
+        let payload = format!(r#"{{"sub":"{}","exp":{},"iss":"https://anchor.example.com"}}"#, sub, exp);
+        let header_b64 = URL_SAFE_NO_PAD.encode(header);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
+        let signing_input = format!("{}.{}", header_b64, payload_b64);
+        let sig = signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        format!("{}.{}", signing_input, sig_b64)
+    }
+
+    fn build_jwt_no_iss(signing_key: &SigningKey, sub: &str, exp: u64) -> std::string::String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;
+        let payload = format!(r#"{{"sub":"{}","exp":{}}}"#, sub, exp);
         let header_b64 = URL_SAFE_NO_PAD.encode(header);
         let payload_b64 = URL_SAFE_NO_PAD.encode(payload);
         let signing_input = format!("{}.{}", header_b64, payload_b64);
@@ -439,6 +500,7 @@ mod tests {
     fn verify_accepts_valid_token() {
         let env = Env::default();
         ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
         let signing_key = SigningKey::generate(&mut OsRng);
         let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
 
@@ -448,14 +510,17 @@ mod tests {
         let jwt = build_jwt(&signing_key, sub_str.as_str(), 2_000);
         let token = String::from_str(&env, jwt.as_str());
 
-        assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_ok());
-        assert!(verify_sep10_jwt(&env, &token, &pk, None).is_ok());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_ok());
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_ok());
+        });
     }
 
     #[test]
     fn verify_rejects_expired_token() {
         let env = Env::default();
         ledger(&env, 5_000);
+        let contract_id = make_contract_id(&env);
         let signing_key = SigningKey::generate(&mut OsRng);
         let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
 
@@ -465,13 +530,17 @@ mod tests {
         let jwt = build_jwt(&signing_key, sub_str.as_str(), 1_000);
         let token = String::from_str(&env, jwt.as_str());
 
-        assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_err());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_err());
+        });
     }
 
     #[test]
+    #[should_panic]
     fn verify_rejects_invalid_signature() {
         let env = Env::default();
         ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
         let signing_key = SigningKey::generate(&mut OsRng);
         let other_key = SigningKey::generate(&mut OsRng);
         let pk = Bytes::from_slice(&env, other_key.verifying_key().as_bytes());
@@ -482,45 +551,50 @@ mod tests {
         let jwt = build_jwt(&signing_key, sub_str.as_str(), 2_000);
         let token = String::from_str(&env, jwt.as_str());
 
-        assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_err());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, Some(&sub)).is_err());
+        });
     }
 
-    // Issue #61: nbf support
     #[test]
     fn verify_rejects_token_with_future_nbf() {
         let env = Env::default();
         ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
         let signing_key = SigningKey::generate(&mut OsRng);
         let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
 
         let attestor = Address::generate(&env);
         let sub_str: std::string::String = attestor.to_string().to_string();
-        // nbf is in the future (now=1000, nbf=2000)
         let jwt = build_jwt_full(&signing_key, sub_str.as_str(), 5_000, Some(2_000), None);
         let token = String::from_str(&env, jwt.as_str());
-        assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        });
     }
 
     #[test]
     fn verify_accepts_token_with_past_nbf() {
         let env = Env::default();
         ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
         let signing_key = SigningKey::generate(&mut OsRng);
         let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
 
         let attestor = Address::generate(&env);
         let sub_str: std::string::String = attestor.to_string().to_string();
-        // nbf is in the past (now=1000, nbf=500)
         let jwt = build_jwt_full(&signing_key, sub_str.as_str(), 5_000, Some(500), None);
         let token = String::from_str(&env, jwt.as_str());
-        assert!(verify_sep10_jwt(&env, &token, &pk, None).is_ok());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_ok());
+        });
     }
 
-    // Issue #63: jti replay protection
     #[test]
     fn verify_rejects_replayed_jti() {
         let env = Env::default();
         ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
         let signing_key = SigningKey::generate(&mut OsRng);
         let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
 
@@ -529,50 +603,114 @@ mod tests {
         let jwt = build_jwt_full(&signing_key, sub_str.as_str(), 5_000, None, Some("unique-jti-abc"));
         let token = String::from_str(&env, jwt.as_str());
 
-        // First use: ok
-        assert!(verify_sep10_jwt(&env, &token, &pk, None).is_ok());
-        // Second use (replay): rejected
-        assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_ok());
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        });
     }
 
-    // Issue #64: configurable max JWT length
     #[test]
     fn verify_rejects_token_exceeding_default_max_len() {
         let env = Env::default();
         ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
         let signing_key = SigningKey::generate(&mut OsRng);
         let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
 
-        // Build a token that exceeds 2048 chars by padding sub
         let long_sub = "G".repeat(2000);
         let jwt = build_jwt(&signing_key, &long_sub, 5_000);
         let token = String::from_str(&env, jwt.as_str());
-        assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        });
     }
 
     #[test]
     fn verify_accepts_token_within_custom_max_len() {
         let env = Env::default();
         ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
         let signing_key = SigningKey::generate(&mut OsRng);
         let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
 
-        // Store a larger max len in instance storage
-        env.storage()
-            .instance()
-            .set(&soroban_sdk::symbol_short!("JWTMAXLEN"), &8192u32);
-
-        let long_sub = "G".repeat(2000);
-        let jwt = build_jwt(&signing_key, &long_sub, 5_000);
-        // Only test length gate — signature will fail for a fake sub, so just check it's not a length error
-        // by verifying a properly signed token with a normal sub passes
         let attestor = Address::generate(&env);
         let sub_str: std::string::String = attestor.to_string().to_string();
         let jwt2 = build_jwt(&signing_key, sub_str.as_str(), 5_000);
         let token2 = String::from_str(&env, jwt2.as_str());
-        assert!(verify_sep10_jwt(&env, &token2, &pk, None).is_ok());
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&soroban_sdk::symbol_short!("JWTMAXLEN"), &8192u32);
+            assert!(verify_sep10_jwt(&env, &token2, &pk, None).is_ok());
+        });
+    }
 
-        let _ = long_sub;
-        let _ = jwt;
+    #[test]
+    fn verify_rejects_missing_iss_claim() {
+        let env = Env::default();
+        ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
+
+        let attestor = Address::generate(&env);
+        let sub_str: std::string::String = attestor.to_string().to_string();
+        let jwt = build_jwt_no_iss(&signing_key, sub_str.as_str(), 5_000);
+        let token = String::from_str(&env, jwt.as_str());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        });
+    }
+
+    #[test]
+    fn verify_rejects_rs256_algorithm() {
+        let env = Env::default();
+        ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
+
+        let attestor = Address::generate(&env);
+        let sub_str: std::string::String = attestor.to_string().to_string();
+        // RS256 header — should be rejected even if EdDSA is absent
+        let jwt = build_jwt_with_alg(&signing_key, "RS256", sub_str.as_str(), 5_000);
+        let token = String::from_str(&env, jwt.as_str());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        });
+    }
+
+    #[test]
+    fn verify_rejects_hs256_algorithm() {
+        let env = Env::default();
+        ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
+
+        let attestor = Address::generate(&env);
+        let sub_str: std::string::String = attestor.to_string().to_string();
+        let jwt = build_jwt_with_alg(&signing_key, "HS256", sub_str.as_str(), 5_000);
+        let token = String::from_str(&env, jwt.as_str());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        });
+    }
+
+    #[test]
+    fn verify_rejects_none_algorithm() {
+        let env = Env::default();
+        ledger(&env, 1_000);
+        let contract_id = make_contract_id(&env);
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let pk = Bytes::from_slice(&env, signing_key.verifying_key().as_bytes());
+
+        let attestor = Address::generate(&env);
+        let sub_str: std::string::String = attestor.to_string().to_string();
+        let jwt = build_jwt_with_alg(&signing_key, "none", sub_str.as_str(), 5_000);
+        let token = String::from_str(&env, jwt.as_str());
+        env.as_contract(&contract_id, || {
+            assert!(verify_sep10_jwt(&env, &token, &pk, None).is_err());
+        });
     }
 }

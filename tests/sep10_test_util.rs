@@ -4,7 +4,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::{Address, Bytes, BytesN, Env, String};
 
-use crate::contract::AnchorKitContractClient;
+use anchorkit::contract::AnchorKitContractClient;
 
 pub fn build_sep10_jwt(signing_key: &SigningKey, sub: &str, exp: u64) -> std::string::String {
     let header = r#"{"alg":"EdDSA","typ":"JWT"}"#;

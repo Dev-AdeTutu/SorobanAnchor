@@ -1,4 +1,4 @@
-use Vec;
+use alloc::vec::Vec;
 
 /// Retry configuration for off-chain anchor requests.
 ///
@@ -276,12 +276,19 @@ where
         }
     }
 
-    Err(last_err.expect("max_attempts must be >= 1"))
+    // Safety: the loop above always returns early via `return Err(e)` when
+    // `attempt + 1 >= config.max_attempts`, so `last_err` is always `Some` here.
+    // We use an explicit match instead of expect to avoid any panic path.
+    match last_err {
+        Some(e) => Err(e),
+        None => unreachable!("retry_with_backoff: max_attempts must be >= 1"),
+    }
 }
 
 #[cfg(test)]
 mod retry_tests {
     use super::*;
+    use alloc::vec;
 
     #[derive(Debug, PartialEq)]
     enum TestError {
