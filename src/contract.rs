@@ -9,7 +9,7 @@ use crate::deterministic_hash::{compute_payload_hash, make_storage_key, verify_p
 use crate::errors::ErrorCode;
 use crate::rate_limiter::RateLimiter;
 use crate::sep10_jwt;
-use crate::transaction_state_tracker::{TransactionState, TransactionStateRecord};
+use crate::transaction_state_tracker::{OptRecovery, TransactionState, TransactionStateRecord};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -715,7 +715,7 @@ fn validate_currency_code(env: &Env, code: &String) {
         panic_with_error!(env, ErrorCode::InvalidAssetCode);
     }
     // Soroban String: iterate bytes and check ASCII alphanumeric
-    let bytes = code.to_xdr(env);
+    let bytes = code.clone().to_xdr(env);
     // XDR-encoded string has a 4-byte length prefix; skip it
     let n = bytes.len() as usize;
     for i in 4..n {
@@ -3145,8 +3145,10 @@ impl AnchorKitContract {
             initiator,
             timestamp: now,
             last_updated: now,
+            last_updated_ledger: env.ledger().sequence(),
             error_message: None,
             state_history: history,
+            recovery_metadata: OptRecovery::None,
         };
         let key = (symbol_short!("TXSTATE"), transaction_id);
         env.storage().persistent().set(&key, &record);

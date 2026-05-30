@@ -1,6 +1,42 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+// ── Secret key wrapper (zeroizing) ───────────────────────────────────────────
+//
+// Prevents accidental secret leakage through Debug/Display, and zeroizes the
+// key material when the value is dropped (post-use or on error paths).
+
+struct SecretKey(String);
+
+impl SecretKey {
+    fn new(raw: impl Into<String>) -> Self { Self(raw.into()) }
+    fn expose(&self) -> &str { &self.0 }
+}
+
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretKey([REDACTED])")
+    }
+}
+
+impl std::fmt::Display for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+impl std::ops::Deref for SecretKey {
+    type Target = str;
+    fn deref(&self) -> &str { &self.0 }
+}
+
+impl Drop for SecretKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
 // ── Network profile management ────────────────────────────────────────────────
 
 #[derive(Serialize, serde::Deserialize, Clone, Debug)]
@@ -69,8 +105,20 @@ fn default_network() -> String {
 
 
 /// Resolve the signing source from flags or environment.
-/// Priority: --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file > --credential-name
-fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credential_name: Option<&str>) -> String {
+/// Priority: --ephemeral-token > --secret-key > ANCHOR_ADMIN_SECRET > --keypair-file > --credential-name
+///
+/// In non-interactive mode, any path that would require a TTY prompt exits
+/// immediately with a descriptive error so batch scripts never hang.
+fn resolve_source(
+    secret_key: Option<&str>,
+    keypair_file: Option<&str>,
+    credential_name: Option<&str>,
+    ephemeral_token: Option<&str>,
+    no_interactive: bool,
+) -> SecretKey {
+    if let Some(tok) = ephemeral_token {
+        return SecretKey::new(tok);
+    }
     if let Some(sk) = secret_key {
         return SecretKey::new(sk);
     }
@@ -95,11 +143,17 @@ fn resolve_source(secret_key: Option<&str>, keypair_file: Option<&str>, credenti
         return SecretKey::new(raw.trim());
     }
     if let Some(name) = credential_name {
+        if no_interactive {
+            eprintln!("error: --credential-name requires an interactive password prompt; \
+                       use --secret-key, --ephemeral-token, or ANCHOR_ADMIN_SECRET in non-interactive mode");
+            std::process::exit(1);
+        }
         let password = rpassword::prompt_password("Keystore password: ")
             .unwrap_or_else(|e| { eprintln!("error: failed to read password: {e}"); std::process::exit(1); });
         return keystore_get_decrypted(name, &password);
     }
-    eprintln!("error: signing key required — provide --secret-key, set ANCHOR_ADMIN_SECRET, use --keypair-file, or use --credential-name");
+    eprintln!("error: signing key required — provide --secret-key, --ephemeral-token, \
+               set ANCHOR_ADMIN_SECRET, use --keypair-file, or use --credential-name");
     std::process::exit(1);
 }
 
@@ -166,6 +220,17 @@ struct Cli {
     /// Stellar network: testnet | mainnet | futurenet | <custom> (or set STELLAR_NETWORK)
     #[arg(long, global = true, env = "STELLAR_NETWORK")]
     network: Option<String>,
+
+    /// Disable all interactive prompts; batch scripts use this to avoid hanging on input.
+    /// Also enabled by setting ANCHORKIT_NO_INTERACTIVE=1.
+    #[arg(long, global = true, env = "ANCHORKIT_NO_INTERACTIVE")]
+    no_interactive: bool,
+
+    /// One-time ephemeral signing token (highest priority over other key sources; zeroized after use).
+    /// Intended for single-operation authorization in automated flows.
+    /// Also settable via ANCHORKIT_EPHEMERAL_TOKEN.
+    #[arg(long, global = true, env = "ANCHORKIT_EPHEMERAL_TOKEN")]
+    ephemeral_token: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -415,7 +480,7 @@ fn pre_deploy_validate(network: &str) -> bool {
 ///   2. Upload the WASM to the network and obtain its hash.
 ///   3. Call `upgrade(new_wasm_hash)` on the contract.
 ///   4. Call `migrate()` to apply any state-schema changes.
-fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
+fn upgrade_contract(contract_id: &str, network: &str, source: &SecretKey) {
     println!("\n🔍 Pre-upgrade validation ({network})...");
     if !pre_deploy_validate(network) {
         eprintln!("\n❌ Pre-upgrade validation failed. Aborting.");
@@ -448,7 +513,7 @@ fn upgrade_contract(contract_id: &str, network: &str, source: &str) {
         .args([
             "contract", "upload",
             "--wasm", wasm,
-            "--source", source,
+            "--source", source.expose(),
             "--rpc-url", &net_url,
             "--network-passphrase", &net_phrase,
         ])
@@ -1112,15 +1177,21 @@ fn keystore_decrypt(password: &str, name: &str, stored: &str) -> Result<String, 
     String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))
 }
 
-fn keystore_get_decrypted(name: &str, password: &str) -> String {
+fn keystore_get_decrypted(name: &str, password: &str) -> SecretKey {
     let store = keystore_load();
     let stored = store.get(name)
         .unwrap_or_else(|| { eprintln!("error: credential '{}' not found", name); std::process::exit(1); });
-    keystore_decrypt(password, name, stored)
-        .unwrap_or_else(|e| { eprintln!("error: failed to decrypt credential: {e}"); std::process::exit(1); })
+    let plaintext = keystore_decrypt(password, name, stored)
+        .unwrap_or_else(|e| { eprintln!("error: failed to decrypt credential: {e}"); std::process::exit(1); });
+    SecretKey::new(plaintext)
 }
 
-fn credentials_add(name: &str, value: Option<&str>) {
+fn credentials_add(name: &str, value: Option<&str>, no_interactive: bool) {
+    if no_interactive {
+        eprintln!("error: 'credentials add' requires interactive password prompts; \
+                   not supported with --no-interactive / ANCHORKIT_NO_INTERACTIVE");
+        std::process::exit(1);
+    }
     let secret = match value {
         Some(v) => v.to_string(),
         None => rpassword::prompt_password("Secret key value: ")
@@ -1141,11 +1212,16 @@ fn credentials_add(name: &str, value: Option<&str>) {
     println!("Credential '{}' stored.", name);
 }
 
-fn credentials_get(name: &str) {
+fn credentials_get(name: &str, no_interactive: bool) {
+    if no_interactive {
+        eprintln!("error: 'credentials get' requires an interactive password prompt; \
+                   not supported with --no-interactive / ANCHORKIT_NO_INTERACTIVE");
+        std::process::exit(1);
+    }
     let password = rpassword::prompt_password("Keystore password: ")
         .unwrap_or_else(|e| { eprintln!("error: {e}"); std::process::exit(1); });
     let secret = keystore_get_decrypted(name, &password);
-    println!("{secret}");
+    println!("{}", secret.expose());
 }
 
 fn credentials_list() {
@@ -1174,6 +1250,8 @@ fn credentials_remove(name: &str) {
 fn main() {
     let cli = Cli::parse();
     let network = cli.network.unwrap_or_else(default_network);
+    let no_interactive = cli.no_interactive;
+    let ephemeral_token = cli.ephemeral_token.as_deref();
     match cli.command {
         Commands::Deploy { network: cmd_net, source, admin, dry_run, list, upgrade, secret_key, keypair_file } => {
             let net = cmd_net;
@@ -1182,30 +1260,44 @@ fn main() {
                     eprintln!("error: --contract-id (or ANCHOR_CONTRACT_ID) is required for --upgrade");
                     std::process::exit(1);
                 });
-                let signing_source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), None);
+                let signing_source = resolve_source(
+                    secret_key.as_deref(), keypair_file.as_deref(), None,
+                    ephemeral_token, no_interactive,
+                );
                 upgrade_contract(&contract_id, &net, &signing_source);
             } else {
                 deploy(&net, &source, admin.as_deref(), dry_run, list);
             }
         }
         Commands::Register { address, services, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, sep10_token, sep10_issuer } => {
-            let net = cmd_net;
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
-            register(&address, &services, &contract_id, &net, &source, &sep10_token, &sep10_issuer);
+            let source = resolve_source(
+                secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref(),
+                ephemeral_token, no_interactive,
+            );
+            register(&address, &services, &contract_id, &cmd_net, &source, &sep10_token, &sep10_issuer);
         }
         Commands::Attest { subject, payload_hash, contract_id, network: cmd_net, secret_key, keypair_file, credential_name, issuer, session_id } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
+            let source = resolve_source(
+                secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref(),
+                ephemeral_token, no_interactive,
+            );
             attest(&subject, &payload_hash, &contract_id, &cmd_net, &source, &issuer, session_id);
         }
         Commands::Quote { from, to, amount, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
+            let source = resolve_source(
+                secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref(),
+                ephemeral_token, no_interactive,
+            );
             quote(&from, &to, amount, &contract_id, &cmd_net, &source);
         }
         Commands::Status { tx_id, anchor_url } => {
             status(&tx_id, &anchor_url);
         }
         Commands::Revoke { address, contract_id, network: cmd_net, secret_key, keypair_file, credential_name } => {
-            let source = resolve_source(secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref());
+            let source = resolve_source(
+                secret_key.as_deref(), keypair_file.as_deref(), credential_name.as_deref(),
+                ephemeral_token, no_interactive,
+            );
             revoke(&address, &contract_id, &cmd_net, &source);
         }
         Commands::Doctor { fix } => {
@@ -1217,10 +1309,10 @@ fn main() {
         Commands::Credentials { action } => {
             match action {
                 CredentialsAction::Add { name, value } => {
-                    credentials_add(&name, value.as_deref());
+                    credentials_add(&name, value.as_deref(), no_interactive);
                 }
                 CredentialsAction::Get { name } => {
-                    credentials_get(&name);
+                    credentials_get(&name, no_interactive);
                 }
                 CredentialsAction::List => {
                     credentials_list();

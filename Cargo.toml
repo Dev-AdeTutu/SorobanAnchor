@@ -21,14 +21,56 @@ path = "examples/request_history_example.rs"
 
 [features]
 default = ["std"]
-# std: enables standard library support (networking, filesystem, threads).
-#      Enabled by default for native builds. Must be disabled for WASM targets.
+
+# std — Standard-library support.
+#
+# Enabled by default for native (host) builds. Unlocks:
+#   • `config` module: load_runtime_config_file / parse_runtime_config_str
+#   • RuntimeConfig, ConfigFormat types
+#
+# Disable when targeting no_std environments (bare-metal, WASM).
+# Note: the HTTP client modules (sep6, sep24, sep38, webhook, streaming_monitor)
+# are always available on native targets but excluded when `wasm` is enabled.
 std = []
-# wasm: targets wasm32-unknown-unknown for Soroban on-chain deployment.
-#       Disables std, reqwest, and any host-only modules (main.rs CLI, examples).
-#       Build with: cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm
+
+# wasm — Soroban on-chain WASM target.
+#
+# Enable exclusively for Soroban smart-contract deployments:
+#   cargo build --release --target wasm32-unknown-unknown --no-default-features --features wasm
+#
+# What this feature does:
+#   • Excludes all HTTP / host-only modules (sep6, sep24, sep38, stellar_toml,
+#     webhook, streaming_monitor, response_validator) — Soroban contracts have
+#     no outbound network access.
+#   • Keeps the on-chain `contract` module, error types, rate limiter, retry
+#     logic, transaction state tracker, and cryptographic helpers.
+#
+# Never combine with `std` for a WASM deployment build.
 wasm = []
+
+# mock-only — Pre-built response fixtures for testing without a live anchor.
+#
+# Enables the `mock` module which exports:
+#   • mock_deposit_response()       — RawDepositResponse
+#   • mock_withdrawal_response()    — RawWithdrawalResponse
+#   • mock_transaction_response_pending() / _completed()
+#   • mock_interactive_deposit_response()
+#   • mock_interactive_withdrawal_response()
+#   • mock_sep24_transaction_pending() / _completed()
+#   • mock_price() / mock_firm_quote() — SEP-38 quotes
+#   • mock_anchor_capabilities()
+#
+# Safe to combine with `std`: `--features std,mock-only`
+# Never enable in production binaries.
 mock-only = []
+
+# stress-tests — Load-simulation integration test suite.
+#
+# Gates the `tests/load_simulation_tests.rs` file which runs high-concurrency
+# and throughput scenarios. Excluded from normal CI to avoid slowing PR checks.
+#
+# Run with: cargo test --features stress-tests
+# Safe to combine with other features.
 stress-tests = []
 
 [dependencies]
@@ -43,6 +85,7 @@ argon2 = { version = "0.5.3" }
 rand = { version = "0.8", features = ["std"] }
 base64 = { version = "0.22" }
 rpassword = { version = "7.3" }
+zeroize = { version = "1" }
 
 [build-dependencies]
 serde_json = "1"
