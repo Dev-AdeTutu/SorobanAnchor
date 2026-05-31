@@ -868,8 +868,34 @@ impl AnchorKitContract {
     // Initialization
     // -----------------------------------------------------------------------
 
-    /// Initialize the contract with an admin address. Can only be called once.
-    /// Panics with `AlreadyInitialized` on any subsequent call.
+    /// Initialize the contract with an admin address.
+    ///
+    /// Sets up the contract instance and persistent storage. Must be called exactly once
+    /// before any other contract operations. Subsequent calls will panic.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `admin` - The address that will have admin privileges. Must authorize this call.
+    ///
+    /// # Authorization
+    ///
+    /// Requires the `admin` address to sign the transaction.
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::AlreadyInitialized`] if the contract has already been initialized.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let admin = Address::random(&env);
+    /// AnchorKitContract::initialize(env, admin);
+    /// ```
     pub fn initialize(env: Env, admin: Address) {
         admin.require_auth();
         // #228: dedicated initialized flag in persistent storage prevents
@@ -884,7 +910,26 @@ impl AnchorKitContract {
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
     }
 
-    /// Returns `true` if the contract has been initialized, `false` otherwise.
+    /// Check if the contract has been initialized.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// `true` if [`initialize`](Self::initialize) has been called successfully, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::Env;
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let initialized = AnchorKitContract::is_initialized(env);
+    /// assert!(initialized);
+    /// ```
     pub fn is_initialized(env: Env) -> bool {
         env.storage()
             .instance()
@@ -892,6 +937,29 @@ impl AnchorKitContract {
             .unwrap_or(false)
     }
 
+    /// Retrieve the current admin address.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// The [`Address`] of the current admin.
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::NotInitialized`] if the contract has not been initialized.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::Env;
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let admin = AnchorKitContract::get_admin(env);
+    /// ```
     pub fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
@@ -948,9 +1016,30 @@ impl AnchorKitContract {
         make_storage_key(env, &[b"VERSION"])
     }
 
-    /// Return the current contract version.
-    /// Returns `ContractVersion { major: 0, minor: 1, patch: 0, upgraded_at: 0 }` if
-    /// no version has been stored yet (i.e. the contract has never been upgraded).
+    /// Retrieve the current contract version.
+    ///
+    /// Returns semantic version information and the timestamp of the last upgrade.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// A [`ContractVersion`] struct containing:
+    /// - `major`, `minor`, `patch` - semantic version components
+    /// - `upgraded_at` - ledger timestamp of the last upgrade (0 if never upgraded)
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::Env;
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let version = AnchorKitContract::get_version(env);
+    /// println!("Version: {}.{}.{}", version.major, version.minor, version.patch);
+    /// ```
     pub fn get_version(env: Env) -> ContractVersion {
         env.storage()
             .instance()
@@ -963,8 +1052,42 @@ impl AnchorKitContract {
             })
     }
 
-    /// Upgrade the contract WASM to `new_wasm_hash`.
-    /// Requires admin authorization and that the contract is already initialized.
+    /// Upgrade the contract WASM code to a new version.
+    ///
+    /// Atomically updates the contract bytecode, increments the patch version, and emits
+    /// an upgrade event. The contract must be initialized and the caller must be the admin.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `new_wasm_hash` - The SHA-256 hash of the new WASM bytecode.
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin authorization.
+    ///
+    /// # Errors
+    ///
+    /// Panics with:
+    /// - [`ErrorCode::NotInitialized`] if the contract has not been initialized.
+    /// - [`ErrorCode::UnauthorizedAttestor`] if the caller is not the admin.
+    ///
+    /// # Side effects
+    ///
+    /// - Increments the patch version component.
+    /// - Records the upgrade timestamp.
+    /// - Emits an `UpgradeEvent` with old/new WASM hashes and version info.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Env, BytesN};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let new_hash = BytesN::from_array(&env, &[0u8; 32]);
+    /// AnchorKitContract::upgrade(env, new_hash);
+    /// ```
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         // #228: must be initialized before upgrade is permitted
         if !env.storage().persistent().has(&initialized_key(&env)) {
@@ -1009,8 +1132,33 @@ impl AnchorKitContract {
         );
     }
 
-    /// Idempotent post-upgrade migration hook.
-    /// Requires admin authorization and that the contract is already initialized.
+    /// Run post-upgrade migration logic (idempotent).
+    ///
+    /// Called after a contract upgrade to perform any necessary data migrations or
+    /// initialization of new storage fields. This function is idempotent — calling it
+    /// multiple times has the same effect as calling it once.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin authorization.
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::NotInitialized`] if the contract has not been initialized.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::Env;
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// AnchorKitContract::migrate(env);
+    /// ```
     pub fn migrate(env: Env) {
         // #228: migrate must not run before initialization
         if !env.storage().persistent().has(&initialized_key(&env)) {
@@ -1030,10 +1178,30 @@ impl AnchorKitContract {
             .extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
     }
 
-    /// Return the current data-schema version written into every new record.
+    /// Get the current on-chain data schema version.
     ///
-    /// Consumers can compare the value returned by stored records against this
-    /// constant to detect version skew after a WASM upgrade.
+    /// Returns the schema version constant that is written into every new persistent record
+    /// (attestations, quotes, KYC records, etc.). Consumers can compare stored record versions
+    /// against this value to detect version skew after a WASM upgrade.
+    ///
+    /// # Arguments
+    ///
+    /// * `_env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// The current schema version (currently [`SCHEMA_V1`] = 1).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::Env;
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let schema_version = AnchorKitContract::get_schema_version(env);
+    /// assert_eq!(schema_version, 1);
+    /// ```
     pub fn get_schema_version(_env: Env) -> u32 {
         SCHEMA_V1
     }
@@ -1046,14 +1214,70 @@ impl AnchorKitContract {
         soroban_sdk::vec![env, symbol_short!("CACHCFG")]
     }
 
-    /// Store a new [`CacheConfig`] in instance storage. Admin-only.
+    /// Set the global cache configuration.
+    ///
+    /// Configures default TTL values for metadata and capabilities caching. These values
+    /// are used as fallbacks when cache operations are called without an explicit TTL override.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `config` - A [`CacheConfig`] struct with:
+    ///   - `metadata_ttl_seconds` - primary TTL for anchor metadata entries
+    ///   - `capabilities_ttl_seconds` - primary TTL for capabilities/stellar.toml entries
+    ///   - `swr_ttl_seconds` - stale-while-revalidate grace period
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin authorization.
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::UnauthorizedAttestor`] if the caller is not the admin.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::Env;
+    /// use anchorkit::{AnchorKitContract, CacheConfig};
+    ///
+    /// let env = Env::default();
+    /// let config = CacheConfig {
+    ///     metadata_ttl_seconds: 3600,
+    ///     capabilities_ttl_seconds: 21600,
+    ///     swr_ttl_seconds: 300,
+    /// };
+    /// AnchorKitContract::set_cache_config(env, config);
+    /// ```
     pub fn set_cache_config(env: Env, config: CacheConfig) {
         Self::require_admin(&env);
         env.storage().instance().set(&Self::cache_config_key(&env), &config);
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
     }
 
-    /// Return the active [`CacheConfig`], falling back to [`CacheConfig::default_config`].
+    /// Get the current global cache configuration.
+    ///
+    /// Returns the active cache TTL settings, or sensible production defaults if no
+    /// configuration has been set.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// A [`CacheConfig`] struct with the current TTL settings.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::Env;
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let config = AnchorKitContract::get_cache_config(env);
+    /// println!("Metadata TTL: {} seconds", config.metadata_ttl_seconds);
+    /// ```
     pub fn get_cache_config(env: Env) -> CacheConfig {
         env.storage()
             .instance()
@@ -1321,6 +1545,49 @@ impl AnchorKitContract {
         }
     }
 
+    /// Register a new attestor with SEP-10 verification.
+    ///
+    /// Adds an attestor to the registry after verifying a SEP-10 JWT token.
+    /// The attestor's Ed25519 public key is stored for signature verification.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `attestor` - Address of the attestor to register.
+    /// * `sep10_token` - SEP-10 JWT token for verification.
+    /// * `sep10_issuer` - Issuer address for SEP-10 token validation.
+    /// * `public_key` - Ed25519 public key for attestation signature verification.
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin authorization.
+    ///
+    /// # Errors
+    ///
+    /// Panics with:
+    /// - [`ErrorCode::AttestorAlreadyRegistered`] if attestor already registered
+    /// - [`ErrorCode::InvalidSep10Token`] if token is invalid or expired
+    /// - [`ErrorCode::UnauthorizedAttestor`] if caller not authorized
+    ///
+    /// # Side effects
+    ///
+    /// - Stores attestor in registry
+    /// - Stores public key for signature verification
+    /// - Emits attestor.added event
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, BytesN, Env, String};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let attestor = Address::random(&env);
+    /// let issuer = Address::random(&env);
+    /// let token = String::from_str(&env, "eyJ...");
+    /// let pubkey = BytesN::from_array(&env, &[0u8; 32]);
+    /// AnchorKitContract::register_attestor(env, attestor, token, issuer, pubkey);
+    /// ```
     pub fn register_attestor(env: Env, attestor: Address, sep10_token: String, sep10_issuer: Address, public_key: BytesN<32>) {
         Self::require_admin(&env);
         Self::verify_sep10_token_matches_attestor(&env, &sep10_token, &sep10_issuer, &attestor);
@@ -1345,6 +1612,41 @@ impl AnchorKitContract {
         );
     }
 
+    /// Revoke an attestor's registration.
+    ///
+    /// Removes an attestor from the registry, preventing them from issuing new attestations.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `attestor` - Address of attestor to revoke.
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin authorization.
+    ///
+    /// # Errors
+    ///
+    /// Panics with:
+    /// - [`ErrorCode::AttestorNotRegistered`] if attestor not registered
+    /// - [`ErrorCode::UnauthorizedAttestor`] if caller not authorized
+    ///
+    /// # Side effects
+    ///
+    /// - Removes attestor from registry
+    /// - Removes stored public key
+    /// - Emits attestor.removed event
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let attestor = Address::random(&env);
+    /// AnchorKitContract::revoke_attestor(env, attestor);
+    /// ```
     pub fn revoke_attestor(env: Env, attestor: Address) {
         Self::require_admin(&env);
         let xdr = attestor.clone().to_xdr(&env);
@@ -1362,6 +1664,31 @@ impl AnchorKitContract {
         );
     }
 
+    /// Check if an address is a registered attestor.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `attestor` - Address to check.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the address is registered as an attestor, `false` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// None
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let attestor = Address::random(&env);
+    /// let is_registered = AnchorKitContract::is_attestor(env, attestor);
+    /// ```
     pub fn is_attestor(env: Env, attestor: Address) -> bool {
         let xdr = attestor.clone().to_xdr(&env);
         let raw = xdr_to_vec(&xdr);
@@ -1402,7 +1729,35 @@ impl AnchorKitContract {
             .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
     }
 
-    /// Return the unified `AttestorProfile` for an attestor.
+    /// Get the complete profile for an attestor.
+    ///
+    /// Returns all profile information including endpoint, webhook URL, supported services,
+    /// and enabled status.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `attestor` - Address of the attestor.
+    ///
+    /// # Returns
+    ///
+    /// [`AttestorProfile`] with endpoint, webhook_url, services, enabled, updated_at
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::AttestorNotRegistered`] if attestor not registered.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let attestor = Address::random(&env);
+    /// let profile = AnchorKitContract::get_attestor_profile(env, attestor);
+    /// println!("Endpoint: {}", profile.endpoint);
+    /// ```
     pub fn get_attestor_profile(env: Env, attestor: Address) -> AttestorProfile {
         if !Self::is_attestor(env.clone(), attestor.clone()) {
             panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
@@ -1414,6 +1769,43 @@ impl AnchorKitContract {
     // Attestor endpoint management
     // -----------------------------------------------------------------------
 
+    /// Set the HTTPS endpoint URL for an attestor.
+    ///
+    /// Updates the attestor's endpoint URL used for external API calls.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `attestor` - Address of the attestor.
+    /// * `endpoint` - HTTPS URL for the attestor's API.
+    ///
+    /// # Authorization
+    ///
+    /// Requires the attestor to authorize this call.
+    ///
+    /// # Errors
+    ///
+    /// Panics with:
+    /// - [`ErrorCode::AttestorNotRegistered`] if attestor not registered
+    /// - [`ErrorCode::InvalidEndpointFormat`] if endpoint URL format invalid
+    ///
+    /// # Side effects
+    ///
+    /// - Updates attestor profile
+    /// - Records update timestamp
+    /// - Emits endpoint.updated event
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env, String};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let attestor = Address::random(&env);
+    /// let endpoint = String::from_str(&env, "https://api.example.com");
+    /// AnchorKitContract::set_endpoint(env, attestor, endpoint);
+    /// ```
     pub fn set_endpoint(env: Env, attestor: Address, endpoint: String) {
         attestor.require_auth();
         Self::check_attestor(&env, &attestor);
@@ -1431,6 +1823,31 @@ impl AnchorKitContract {
         );
     }
 
+    /// Get the HTTPS endpoint URL for an attestor.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `attestor` - Address of the attestor.
+    ///
+    /// # Returns
+    ///
+    /// The endpoint URL string (empty if not set).
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::AttestorNotRegistered`] if attestor not registered.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let attestor = Address::random(&env);
+    /// let endpoint = AnchorKitContract::get_endpoint(env, attestor);
+    /// ```
     pub fn get_endpoint(env: Env, attestor: Address) -> String {
         if !Self::is_attestor(env.clone(), attestor.clone()) {
             panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
@@ -1442,6 +1859,40 @@ impl AnchorKitContract {
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestorNotRegistered))
     }
 
+    /// Register a webhook URL for an attestor.
+    ///
+    /// Sets the URL where webhook events will be delivered for this attestor.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `attestor` - Address of the attestor.
+    /// * `webhook_url` - URL where webhooks will be delivered.
+    ///
+    /// # Authorization
+    ///
+    /// Requires the attestor to authorize this call.
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::AttestorNotRegistered`] if attestor not registered.
+    ///
+    /// # Side effects
+    ///
+    /// - Updates attestor profile with webhook URL
+    /// - Records update timestamp
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env, String};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let attestor = Address::random(&env);
+    /// let webhook = String::from_str(&env, "https://api.example.com/webhooks");
+    /// AnchorKitContract::register_webhook(env, attestor, webhook);
+    /// ```
     pub fn register_webhook(env: Env, attestor: Address, webhook_url: String) {
         attestor.require_auth();
         Self::check_attestor(&env, &attestor);
@@ -1462,6 +1913,31 @@ impl AnchorKitContract {
         );
     }
 
+    /// Get the webhook URL for an attestor.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `attestor` - Address of the attestor.
+    ///
+    /// # Returns
+    ///
+    /// The webhook URL string (empty if not set).
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::AttestorNotRegistered`] if attestor not registered.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let attestor = Address::random(&env);
+    /// let webhook = AnchorKitContract::get_webhook_url(env, attestor);
+    /// ```
     pub fn get_webhook_url(env: Env, attestor: Address) -> String {
         if !Self::is_attestor(env.clone(), attestor.clone()) {
             panic_with_error!(&env, ErrorCode::AttestorNotRegistered);
@@ -1481,6 +1957,41 @@ impl AnchorKitContract {
     /// capability version ([`SERVICE_CAPABILITY_VERSION`]). Equivalent to
     /// [`configure_services_versioned`](Self::configure_services_versioned) with
     /// `version = SERVICE_CAPABILITY_VERSION`.
+    /// Configure which services an anchor supports.
+    ///
+    /// Registers the service types (deposits, withdrawals, quotes, KYC) that an anchor
+    /// can provide. Uses the current schema version.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `anchor` - Address of the anchor.
+    /// * `services` - Vector of service type codes:
+    ///   - 1 = Deposits
+    ///   - 2 = Withdrawals
+    ///   - 3 = Quotes
+    ///   - 4 = KYC
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::InvalidServiceType`] if any service code is not recognized.
+    ///
+    /// # Side effects
+    ///
+    /// - Stores service configuration with current schema version
+    /// - Overwrites previous configuration
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env, Vec};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let anchor = Address::random(&env);
+    /// let services = Vec::from_array(&env, [1u32, 3u32]); // deposits + quotes
+    /// AnchorKitContract::configure_services(env, anchor, services);
+    /// ```
     pub fn configure_services(env: Env, anchor: Address, services: Vec<u32>) {
         Self::configure_services_versioned(env, anchor, services, SERVICE_CAPABILITY_VERSION);
     }
@@ -1499,6 +2010,40 @@ impl AnchorKitContract {
     /// On success the record is stored stamped with `version` so capability
     /// discovery is explicit. Re-configuring overwrites the previous record,
     /// which is how an anchor migrates to a newer version.
+    /// Configure services with explicit schema version.
+    ///
+    /// Registers service types with a specific schema version for forward compatibility.
+    /// Rejects versions newer than the current contract version.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `anchor` - Address of the anchor.
+    /// * `services` - Vector of service type codes.
+    /// * `version` - Schema version for this configuration.
+    ///
+    /// # Errors
+    ///
+    /// Panics with:
+    /// - [`ErrorCode::InvalidServiceType`] if any service code not recognized
+    /// - [`ErrorCode::UnsupportedCapabilityVersion`] if version newer than current
+    ///
+    /// # Side effects
+    ///
+    /// - Stores versioned service configuration
+    /// - Overwrites previous configuration
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env, Vec};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let anchor = Address::random(&env);
+    /// let services = Vec::from_array(&env, [1u32, 2u32]); // deposits + withdrawals
+    /// AnchorKitContract::configure_services_versioned(env, anchor, services, 1);
+    /// ```
     pub fn configure_services_versioned(
         env: Env,
         anchor: Address,
@@ -1541,12 +2086,65 @@ impl AnchorKitContract {
     /// The service-capability schema version this contract understands.
     /// Off-chain capability discovery can read this to learn which service
     /// codes the contract will accept.
+    /// Get the current service capability schema version.
+    ///
+    /// Returns the version constant that the contract recognizes for service configurations.
+    ///
+    /// # Arguments
+    ///
+    /// * `_env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// Current capability version (currently 1).
+    ///
+    /// # Errors
+    ///
+    /// None
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::Env;
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let version = AnchorKitContract::current_capability_version(env);
+    /// assert_eq!(version, 1);
+    /// ```
     pub fn current_capability_version(_env: Env) -> u32 {
         SERVICE_CAPABILITY_VERSION
     }
 
     /// Return the capability version an anchor's stored service set was
     /// configured under. Panics with `ServicesNotConfigured` if absent.
+    /// Get the schema version of an anchor's service configuration.
+    ///
+    /// Returns the version under which the anchor's service configuration was stored.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `anchor` - Address of the anchor.
+    ///
+    /// # Returns
+    ///
+    /// Schema version of the anchor's service configuration (0 if not configured).
+    ///
+    /// # Errors
+    ///
+    /// None
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let anchor = Address::random(&env);
+    /// let version = AnchorKitContract::get_service_capability_version(env, anchor);
+    /// ```
     pub fn get_service_capability_version(env: Env, anchor: Address) -> u32 {
         env.storage()
             .persistent()
@@ -1555,6 +2153,31 @@ impl AnchorKitContract {
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ServicesNotConfigured))
     }
 
+    /// Get all services supported by an anchor.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `anchor` - Address of the anchor.
+    ///
+    /// # Returns
+    ///
+    /// [`AnchorServices`] with service codes and schema version.
+    ///
+    /// # Errors
+    ///
+    /// None
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let anchor = Address::random(&env);
+    /// let services = AnchorKitContract::get_supported_services(env, anchor);
+    /// ```
     pub fn get_supported_services(env: Env, anchor: Address) -> AnchorServices {
         let xdr = anchor.clone().to_xdr(&env);
         let raw = xdr_to_vec(&xdr);
@@ -1564,6 +2187,32 @@ impl AnchorKitContract {
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ServicesNotConfigured))
     }
 
+    /// Check if an anchor supports a specific service.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `anchor` - Address of the anchor.
+    /// * `service` - Service type code to check (1=deposits, 2=withdrawals, 3=quotes, 4=kyc).
+    ///
+    /// # Returns
+    ///
+    /// `true` if the anchor supports the service, `false` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// None
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use soroban_sdk::{Address, Env};
+    /// use anchorkit::AnchorKitContract;
+    ///
+    /// let env = Env::default();
+    /// let anchor = Address::random(&env);
+    /// let supports_deposits = AnchorKitContract::supports_service(env, anchor, 1);
+    /// ```
     pub fn supports_service(env: Env, anchor: Address, service: u32) -> bool {
         let xdr = anchor.clone().to_xdr(&env);
         let raw = xdr_to_vec(&xdr);
