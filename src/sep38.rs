@@ -70,6 +70,10 @@ pub struct FirmQuote {
     pub sell_asset: String,
     /// Normalized (uppercase) asset code being bought.
     pub buy_asset: String,
+    /// Optional routing reason or referral code explaining why this quote was
+    /// selected (e.g. `"lowest_fee"`, `"referral"`, `"preferred_anchor"`).
+    /// `None` when no reason was recorded (#298).
+    pub routing_reason: Option<std::string::String>,
 }
 
 // ── Raw response types (from anchor APIs) ────────────────────────────────────
@@ -186,6 +190,7 @@ pub fn request_firm_quote(raw: RawFirmQuote, current_timestamp: u64) -> Result<F
         buy_amount: raw.buy_amount,
         sell_asset: normalize_asset_code(&raw.sell_asset)?,
         buy_asset: normalize_asset_code(&raw.buy_asset)?,
+        routing_reason: None,
     })
 }
 
