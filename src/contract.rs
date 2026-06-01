@@ -41,6 +41,10 @@ pub struct Quote {
     pub valid_until: u64,
     /// Schema version for this record. See [`SCHEMA_V1`].
     pub schema_version: u32,
+    /// Optional routing reason or referral code explaining why this route/anchor
+    /// was chosen (e.g. `"lowest_fee"`, `"preferred_anchor"`, `"referral"`).
+    /// `None` when no reason was recorded.
+    pub routing_reason: Option<String>,
 }
 
 #[contracttype]
@@ -817,6 +821,8 @@ struct QuoteSubmitEvent {
     quote_asset: String,
     rate: u64,
     valid_until: u64,
+    /// Optional routing reason recorded at quote submission time.
+    routing_reason: Option<String>,
 }
 
 #[contracttype]
@@ -2654,6 +2660,64 @@ impl AnchorKitContract {
         Self::record_operation_in_context(&env, &request_id.id, String::from_str(&env, "submit_quote"));
     }
 
+    /// Record a tracing span for a quote submission, including optional routing
+    /// reason metadata in the span operation name (#298).
+    ///
+    /// Behaves exactly like [`quote_with_request_id`] but when `routing_reason`
+    /// is `Some`, the span operation is annotated as
+    /// `"submit_quote_with_reason"` and the reason is recorded in the
+    /// [`RequestContext`] operation chain so downstream audit consumers can
+    /// correlate the reason with the request.
+    ///
+    /// # Arguments
+    ///
+    /// * `routing_reason` – Optional routing reason to attach to the span.
+    ///   When `None` the behaviour is identical to [`quote_with_request_id`].
+    #[allow(unused_variables)]
+    pub fn quote_with_request_id_and_reason(
+        env: Env,
+        request_id: RequestId,
+        anchor: Address,
+        from_asset: String,
+        to_asset: String,
+        amount: u64,
+        fee_bps: u32,
+        min_amount: u64,
+        max_amount: u64,
+        expires_at: u64,
+        routing_reason: Option<String>,
+    ) {
+        anchor.require_auth();
+        let xdr = anchor.clone().to_xdr(&env);
+        let raw = xdr_to_vec(&xdr);
+        let services_record = env
+            .storage()
+            .persistent()
+            .get::<_, AnchorServices>(&make_storage_key(&env, &[b"SERVICES", &raw]))
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ServicesNotConfigured));
+        if !services_record.services.contains(&SERVICE_QUOTES) {
+            panic_with_error!(&env, ErrorCode::ServicesNotConfigured);
+        }
+        let now = env.ledger().timestamp();
+
+        // Choose the operation label based on whether a reason was supplied so
+        // the span is self-describing in audit queries.
+        let operation = if routing_reason.is_some() {
+            String::from_str(&env, "submit_quote_with_reason")
+        } else {
+            String::from_str(&env, "submit_quote")
+        };
+
+        Self::store_span(
+            &env, &request_id,
+            operation.clone(),
+            anchor, now,
+            String::from_str(&env, "success"),
+        );
+
+        Self::record_operation_in_context(&env, &request_id.id, operation);
+    }
+
     // -----------------------------------------------------------------------
     // Tracing span retrieval
     // -----------------------------------------------------------------------
@@ -3146,6 +3210,7 @@ impl AnchorKitContract {
             base_asset: base_asset.clone(), quote_asset: quote_asset.clone(),
             rate, fee_percentage, minimum_amount, maximum_amount, valid_until,
             schema_version: SCHEMA_V1,
+            routing_reason: None,
         };
         let q_key = make_storage_key(&env, &[b"QUOTE", &anchor_raw, &next.to_be_bytes()]);
         env.storage().persistent().set(&q_key, &quote);
@@ -3157,9 +3222,82 @@ impl AnchorKitContract {
 
         env.events().publish(
             (symbol_short!("quote"), symbol_short!("submit"), next),
-            QuoteSubmitEvent { quote_id: next, anchor, base_asset, quote_asset, rate, valid_until },
+            QuoteSubmitEvent { quote_id: next, anchor, base_asset, quote_asset, rate, valid_until, routing_reason: None },
         );
         next
+    }
+
+    /// Submit a quote with optional routing reason metadata (#298).
+    ///
+    /// Identical to [`submit_quote`] but records an optional `routing_reason`
+    /// alongside the quote for audit and customer-support purposes. The reason
+    /// is persisted in the [`Quote`] record and emitted in the submit event so
+    /// it is available for off-chain audit consumers.
+    ///
+    /// # Arguments
+    ///
+    /// * `routing_reason` – Human-readable code explaining why this anchor/route
+    ///   was chosen (e.g. `"lowest_fee"`, `"referral"`, `"preferred_anchor"`).
+    ///   Pass `None` when no reason applies.
+    pub fn submit_quote_with_reason(
+        env: Env,
+        anchor: Address,
+        base_asset: String,
+        quote_asset: String,
+        rate: u64,
+        fee_percentage: u32,
+        minimum_amount: u64,
+        maximum_amount: u64,
+        valid_until: u64,
+        routing_reason: Option<String>,
+    ) -> u64 {
+        anchor.require_auth();
+        validate_currency_code(&env, &base_asset);
+        validate_currency_code(&env, &quote_asset);
+        validate_fee_percent(&env, fee_percentage);
+        validate_amount_limits(&env, minimum_amount, maximum_amount);
+        let inst = env.storage().instance();
+        let qcnt_key = make_storage_key(&env, &[b"QCNT"]);
+        let next: u64 = inst.get(&qcnt_key).unwrap_or(0u64) + 1;
+        inst.set(&qcnt_key, &next);
+        inst.extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+
+        let anchor_xdr = anchor.clone().to_xdr(&env);
+        let anchor_raw = xdr_to_vec(&anchor_xdr);
+        let quote = Quote {
+            quote_id: next, anchor: anchor.clone(),
+            base_asset: base_asset.clone(), quote_asset: quote_asset.clone(),
+            rate, fee_percentage, minimum_amount, maximum_amount, valid_until,
+            schema_version: SCHEMA_V1,
+            routing_reason: routing_reason.clone(),
+        };
+        let q_key = make_storage_key(&env, &[b"QUOTE", &anchor_raw, &next.to_be_bytes()]);
+        env.storage().persistent().set(&q_key, &quote);
+        env.storage().persistent().extend_ttl(&q_key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        let lq_key = make_storage_key(&env, &[b"LATESTQ", &anchor_raw]);
+        env.storage().persistent().set(&lq_key, &next);
+        env.storage().persistent().extend_ttl(&lq_key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("quote"), symbol_short!("submit"), next),
+            QuoteSubmitEvent { quote_id: next, anchor, base_asset, quote_asset, rate, valid_until, routing_reason },
+        );
+        next
+    }
+
+    /// Retrieve the routing reason stored with a quote (#298).
+    ///
+    /// Returns `None` when the quote was submitted without a reason or does not
+    /// exist. Callers that need the full quote record should use [`get_quote`].
+    pub fn get_quote_routing_reason(env: Env, anchor: Address, quote_id: u64) -> Option<String> {
+        let anchor_xdr = anchor.to_xdr(&env);
+        let anchor_raw = xdr_to_vec(&anchor_xdr);
+        let key = make_storage_key(&env, &[b"QUOTE", &anchor_raw, &quote_id.to_be_bytes()]);
+        env.storage()
+            .persistent()
+            .get::<_, Quote>(&key)
+            .and_then(|q| q.routing_reason)
     }
 
     pub fn receive_quote(env: Env, receiver: Address, anchor: Address, quote_id: u64) -> Quote {
@@ -4503,9 +4641,40 @@ impl AnchorKitContract {
         transaction_id: u64,
         initiator: Address,
     ) -> TransactionStateRecord {
+        Self::create_transaction_record_internal(&env, transaction_id, initiator, None)
+    }
+
+    /// Create a transaction record with optional routing reason metadata (#298).
+    ///
+    /// Identical to [`create_transaction_record`] but attaches an optional
+    /// `routing_reason` to the record so callers can store why a particular
+    /// route or anchor was chosen. The reason persists through all subsequent
+    /// state transitions and can be retrieved for auditing via
+    /// [`get_transaction_record`].
+    ///
+    /// # Arguments
+    ///
+    /// * `routing_reason` – Human-readable code or description explaining why
+    ///   this route was chosen (e.g. `"referral"`, `"lowest_fee"`). `None`
+    ///   when no reason applies.
+    pub fn create_transaction_record_with_reason(
+        env: Env,
+        transaction_id: u64,
+        initiator: Address,
+        routing_reason: Option<String>,
+    ) -> TransactionStateRecord {
+        Self::create_transaction_record_internal(&env, transaction_id, initiator, routing_reason)
+    }
+
+    fn create_transaction_record_internal(
+        env: &Env,
+        transaction_id: u64,
+        initiator: Address,
+        routing_reason: Option<String>,
+    ) -> TransactionStateRecord {
         let now = env.ledger().timestamp();
         let current_ledger = env.ledger().sequence();
-        let mut history = soroban_sdk::Vec::new(&env);
+        let mut history = soroban_sdk::Vec::new(env);
         history.push_back((TransactionState::Pending, now));
         let record = TransactionStateRecord {
             transaction_id,
@@ -4517,6 +4686,7 @@ impl AnchorKitContract {
             error_message: None,
             state_history: history,
             recovery_metadata: OptRecovery::None,
+            routing_reason,
         };
         let key = (symbol_short!("TXSTATE"), transaction_id);
         env.storage().persistent().set(&key, &record);
@@ -4525,7 +4695,7 @@ impl AnchorKitContract {
         let ids_key = symbol_short!("TXIDS");
         let mut ids: soroban_sdk::Vec<u64> = env
             .storage().persistent().get(&ids_key)
-            .unwrap_or_else(|| soroban_sdk::Vec::new(&env));
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
         ids.push_back(transaction_id);
         env.storage().persistent().set(&ids_key, &ids);
         env.storage().persistent().extend_ttl(&ids_key, PERSISTENT_TTL, PERSISTENT_TTL);

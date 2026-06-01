@@ -362,6 +362,11 @@ pub struct TransactionStateRecord {
     /// Recovery metadata, populated when the transaction enters the
     /// [`Failed`](TransactionState::Failed) state.
     pub recovery_metadata: OptRecovery,
+    /// Optional routing reason or referral code recorded at creation time (#298).
+    /// Explains why a particular anchor or route was chosen (e.g. `"lowest_fee"`,
+    /// `"referral"`, `"preferred_anchor"`). `None` when no reason was recorded.
+    /// Persists unchanged through all state transitions.
+    pub routing_reason: Option<String>,
 }
 
 /// Aggregated counts per [`TransactionState`] returned by
@@ -484,6 +489,27 @@ impl TransactionStateTracker {
         initiator: Address,
         env: &Env,
     ) -> Result<TransactionStateRecord, String> {
+        self.create_transaction_with_reason(transaction_id, initiator, None, env)
+    }
+
+    /// Create a transaction record with an optional routing reason (#298).
+    ///
+    /// Behaves exactly like [`create_transaction`] but stores `routing_reason`
+    /// in the record so the chosen route or referral source can be audited later.
+    /// The reason is preserved unchanged through all subsequent state transitions.
+    ///
+    /// # Arguments
+    ///
+    /// * `routing_reason` – Human-readable code or description explaining why
+    ///   this route was chosen (e.g. `"referral"`, `"lowest_fee"`). `None`
+    ///   when no reason applies.
+    pub fn create_transaction_with_reason(
+        &mut self,
+        transaction_id: u64,
+        initiator: Address,
+        routing_reason: Option<String>,
+        env: &Env,
+    ) -> Result<TransactionStateRecord, String> {
         let current_time = env.ledger().timestamp();
         let mut history = Vec::new(env);
         history.push_back((TransactionState::Pending, current_time));
@@ -499,6 +525,7 @@ impl TransactionStateTracker {
             error_message: None,
             state_history: history,
             recovery_metadata: OptRecovery::None,
+            routing_reason,
         };
 
         if self.is_dev_mode {
