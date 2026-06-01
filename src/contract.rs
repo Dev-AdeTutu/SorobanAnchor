@@ -981,6 +981,32 @@ fn compliance_check_key(env: &Env, subject: &Address, check_type: &String) -> By
     make_storage_key(env, &[b"COMP", &raw, &ct_bytes])
 }
 
+fn compliance_history_count_key(env: &Env, subject: &Address, check_type: &String) -> BytesN<32> {
+    let xdr = subject.clone().to_xdr(env);
+    let raw = xdr_to_vec(&xdr);
+    let ct_xdr = check_type.clone().to_xdr(env);
+    let ct_bytes = xdr_to_vec(&ct_xdr);
+    make_storage_key(env, &[b"COMPHCNT", &raw, &ct_bytes])
+}
+
+fn compliance_history_entry_key(env: &Env, subject: &Address, check_type: &String, idx: u64) -> BytesN<32> {
+    let xdr = subject.clone().to_xdr(env);
+    let raw = xdr_to_vec(&xdr);
+    let ct_xdr = check_type.clone().to_xdr(env);
+    let ct_bytes = xdr_to_vec(&ct_xdr);
+    make_storage_key(env, &[b"COMPHIST", &raw, &ct_bytes, &idx.to_be_bytes()])
+}
+
+fn compliance_subject_index_key(env: &Env, subject: &Address) -> BytesN<32> {
+    let xdr = subject.clone().to_xdr(env);
+    let raw = xdr_to_vec(&xdr);
+    make_storage_key(env, &[b"COMPIDX", &raw])
+}
+
+fn audit_retention_key(env: &Env) -> BytesN<32> {
+    make_storage_key(env, &[b"AUDITRET"])
+}
+
 fn anchor_meta_key(env: &Env, anchor: &Address) -> BytesN<32> {
     let xdr = anchor.clone().to_xdr(env);
     let raw = xdr_to_vec(&xdr);
@@ -3001,7 +3027,8 @@ impl AnchorKitContract {
     // -----------------------------------------------------------------------
 
     /// Record a compliance check result for a subject (admin-only).
-    /// Stores a `ComplianceCheck` record and emits a `compliance_checked` event.
+    /// Stores the latest `ComplianceCheck` record, appends to history, and updates the
+    /// per-subject check-type index so auditors can query decision histories.
     pub fn record_compliance_check(
         env: Env,
         subject: Address,
@@ -3016,13 +3043,88 @@ impl AnchorKitContract {
             result: if passed { 1u32 } else { 0u32 },
             timestamp: now,
         };
+
+        // Store latest (keyed by subject + check_type)
         let key = compliance_check_key(&env, &subject, &check_type);
         env.storage().persistent().set(&key, &record);
         env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        // Append to ordered history
+        let hist_cnt_key = compliance_history_count_key(&env, &subject, &check_type);
+        let idx: u64 = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&hist_cnt_key)
+            .unwrap_or(0u64);
+        let hist_key = compliance_history_entry_key(&env, &subject, &check_type, idx);
+        env.storage().persistent().set(&hist_key, &record);
+        env.storage().persistent().extend_ttl(&hist_key, PERSISTENT_TTL, PERSISTENT_TTL);
+        env.storage().persistent().set(&hist_cnt_key, &(idx + 1));
+        env.storage().persistent().extend_ttl(&hist_cnt_key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        // Update per-subject check-type index
+        let idx_key = compliance_subject_index_key(&env, &subject);
+        let mut check_types: Vec<String> = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<String>>(&idx_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        if !check_types.contains(&check_type) {
+            check_types.push_back(check_type.clone());
+            env.storage().persistent().set(&idx_key, &check_types);
+            env.storage().persistent().extend_ttl(&idx_key, PERSISTENT_TTL, PERSISTENT_TTL);
+        }
+
         env.events().publish(
             (symbol_short!("comp"), symbol_short!("checked"), subject),
             record,
         );
+    }
+
+    /// Return the most recent compliance check record for `(subject, check_type)`, or
+    /// `None` if no check has been recorded.
+    pub fn get_latest_compliance_check(
+        env: Env,
+        subject: Address,
+        check_type: String,
+    ) -> Option<ComplianceCheck> {
+        let key = compliance_check_key(&env, &subject, &check_type);
+        env.storage().persistent().get(&key)
+    }
+
+    /// Return the ordered history of compliance checks for `(subject, check_type)`.
+    /// Returns up to `limit` records (capped at 50), most-recent last.
+    pub fn get_compliance_check_history(
+        env: Env,
+        subject: Address,
+        check_type: String,
+        limit: u64,
+    ) -> Vec<ComplianceCheck> {
+        let hist_cnt_key = compliance_history_count_key(&env, &subject, &check_type);
+        let total: u64 = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&hist_cnt_key)
+            .unwrap_or(0u64);
+        let effective_limit = limit.min(50);
+        let start = if total > effective_limit { total - effective_limit } else { 0 };
+        let mut results = Vec::new(&env);
+        for i in start..total {
+            let hist_key = compliance_history_entry_key(&env, &subject, &check_type, i);
+            if let Some(entry) = env.storage().persistent().get::<_, ComplianceCheck>(&hist_key) {
+                results.push_back(entry);
+            }
+        }
+        results
+    }
+
+    /// Return all check types that have been recorded for a given subject.
+    pub fn list_subject_compliance_checks(env: Env, subject: Address) -> Vec<String> {
+        let idx_key = compliance_subject_index_key(&env, &subject);
+        env.storage()
+            .persistent()
+            .get::<_, Vec<String>>(&idx_key)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     // -----------------------------------------------------------------------
@@ -3481,6 +3583,97 @@ impl AnchorKitContract {
             .persistent()
             .get::<_, u64>(&make_storage_key(&env, &[b"SOPCNT", &session_id.to_be_bytes()]))
             .unwrap_or(0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit log retention and pagination (#251)
+    // -----------------------------------------------------------------------
+
+    /// Set the audit log retention policy in days (admin-only).
+    /// A value of 0 means no automatic retention limit is enforced.
+    pub fn set_audit_log_retention(env: Env, retention_days: u64) {
+        Self::require_admin(&env);
+        let key = audit_retention_key(&env);
+        env.storage().instance().set(&key, &retention_days);
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
+    /// Return the configured audit log retention policy in days (0 = unlimited).
+    pub fn get_audit_log_retention(env: Env) -> u64 {
+        let key = audit_retention_key(&env);
+        env.storage().instance().get::<_, u64>(&key).unwrap_or(0u64)
+    }
+
+    /// Return the total number of audit log entries ever written.
+    pub fn get_audit_log_count(env: Env) -> u64 {
+        let acnt_key = make_storage_key(&env, &[b"ACNT"]);
+        env.storage().instance().get::<_, u64>(&acnt_key).unwrap_or(0u64)
+    }
+
+    /// Return a page of audit log entries starting at `offset`, up to `limit` entries
+    /// (capped at 50 per call to bound WASM execution).
+    pub fn get_audit_logs_paginated(env: Env, offset: u64, limit: u64) -> Vec<AuditLog> {
+        let acnt_key = make_storage_key(&env, &[b"ACNT"]);
+        let total: u64 = env.storage().instance().get::<_, u64>(&acnt_key).unwrap_or(0u64);
+        let effective_limit = limit.min(50);
+        let end = (offset + effective_limit).min(total);
+        let mut results = Vec::new(&env);
+        for i in offset..end {
+            let audit_key = make_storage_key(&env, &[b"AUDIT", &i.to_be_bytes()]);
+            if let Some(entry) = env.storage().persistent().get::<_, AuditLog>(&audit_key) {
+                results.push_back(entry);
+            }
+        }
+        results
+    }
+
+    /// Paginated retrieval of audit logs scoped to a specific session.
+    /// Returns up to `limit` entries (capped at 50) starting at `offset` within the session.
+    pub fn get_session_logs_paginated(
+        env: Env,
+        session_id: u64,
+        offset: u64,
+        limit: u64,
+    ) -> Vec<AuditLog> {
+        let total: u64 = env
+            .storage()
+            .persistent()
+            .get(&make_storage_key(&env, &[b"SOPCNT", &session_id.to_be_bytes()]))
+            .unwrap_or(0u64);
+        let effective_limit = limit.min(50);
+        let end = (offset + effective_limit).min(total);
+        let mut results = Vec::new(&env);
+        for i in offset..end {
+            let slog_key = make_storage_key(&env, &[b"SLOG", &session_id.to_be_bytes(), &i.to_be_bytes()]);
+            if let Some(log_id) = env.storage().persistent().get::<_, u64>(&slog_key) {
+                let audit_key = make_storage_key(&env, &[b"AUDIT", &log_id.to_be_bytes()]);
+                if let Some(entry) = env.storage().persistent().get::<_, AuditLog>(&audit_key) {
+                    results.push_back(entry);
+                }
+            }
+        }
+        results
+    }
+
+    /// Remove audit log entries whose `operation.timestamp` is strictly before
+    /// `before_timestamp`. Scans up to the first 100 log IDs to remain WASM-safe.
+    /// Returns the number of entries pruned.
+    pub fn prune_audit_logs(env: Env, before_timestamp: u64) -> u64 {
+        Self::require_admin(&env);
+        let acnt_key = make_storage_key(&env, &[b"ACNT"]);
+        let total: u64 = env.storage().instance().get::<_, u64>(&acnt_key).unwrap_or(0u64);
+        let scan_limit = total.min(100);
+        let mut pruned: u64 = 0;
+        for i in 0..scan_limit {
+            let audit_key = make_storage_key(&env, &[b"AUDIT", &i.to_be_bytes()]);
+            if let Some(entry) = env.storage().persistent().get::<_, AuditLog>(&audit_key) {
+                if entry.operation.timestamp < before_timestamp {
+                    env.storage().persistent().remove(&audit_key);
+                    pruned += 1;
+                }
+            }
+        }
+        pruned
     }
 
     // -----------------------------------------------------------------------
