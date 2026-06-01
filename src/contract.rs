@@ -366,6 +366,27 @@ pub struct KycRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Anchor Blacklist and Clustering (#296)
+// ---------------------------------------------------------------------------
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AnchorBlacklistEntry {
+    pub anchor: Address,
+    pub reason: String,
+    pub blacklisted_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct AnchorCluster {
+    pub cluster_id: String,
+    pub name: String,
+    pub anchors: Vec<Address>,
+    pub created_at: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Health check types (#268)
 // ---------------------------------------------------------------------------
 
@@ -880,6 +901,22 @@ fn anchor_meta_key(env: &Env, anchor: &Address) -> BytesN<32> {
     let xdr = anchor.clone().to_xdr(env);
     let raw = xdr_to_vec(&xdr);
     make_storage_key(env, &[b"ANCHMETA", &raw])
+}
+
+fn anchor_blacklist_key(env: &Env, anchor: &Address) -> BytesN<32> {
+    let xdr = anchor.clone().to_xdr(env);
+    let raw = xdr_to_vec(&xdr);
+    make_storage_key(env, &[b"BLACKLIST", &raw])
+}
+
+fn anchor_cluster_key(env: &Env, cluster_id: &String) -> BytesN<32> {
+    let xdr = cluster_id.clone().to_xdr(env);
+    let raw = xdr_to_vec(&xdr);
+    make_storage_key(env, &[b"CLUSTER", &raw])
+}
+
+fn anchor_cluster_list_key(env: &Env) -> BytesN<32> {
+    make_storage_key(env, &[b"CLUSTERLIST"])
 }
 
 /// Convert a Soroban `Bytes` value to a native `Vec<u8>` for use in key helpers.
@@ -3055,6 +3092,61 @@ impl AnchorKitContract {
         quote
     }
 
+    /// Accept a quote with compliance gating (#297).
+    ///
+    /// Verifies that the subject has passed compliance checks before accepting the quote.
+    /// If the subject or corridor requires compliance checks, they must be passed first.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `receiver` - The address accepting the quote.
+    /// * `anchor` - The anchor providing the quote.
+    /// * `quote_id` - The quote identifier.
+    /// * `require_compliance` - Whether to enforce compliance checks.
+    ///
+    /// # Returns
+    ///
+    /// The accepted [`Quote`].
+    ///
+    /// # Errors
+    ///
+    /// Panics with [`ErrorCode::ComplianceNotMet`] if compliance is required but not passed.
+    pub fn accept_quote_with_compliance(
+        env: Env,
+        receiver: Address,
+        anchor: Address,
+        quote_id: u64,
+        require_compliance: bool,
+    ) -> Quote {
+        receiver.require_auth();
+        
+        // Get the quote
+        let anchor_xdr = anchor.clone().to_xdr(&env);
+        let anchor_raw = xdr_to_vec(&anchor_xdr);
+        let q_key = make_storage_key(&env, &[b"QUOTE", &anchor_raw, &quote_id.to_be_bytes()]);
+        let quote: Quote = env.storage().persistent().get(&q_key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::AttestationNotFound));
+
+        // #297: Enforce compliance gating if required
+        if require_compliance {
+            let comp_key = compliance_check_key(&env, &receiver, &String::from_str(&env, "kyc"));
+            let passed = env.storage().persistent()
+                .get::<_, ComplianceCheck>(&comp_key)
+                .map(|r| r.result == 1u32)
+                .unwrap_or(false);
+            if !passed {
+                panic_with_error!(&env, ErrorCode::ComplianceNotMet);
+            }
+        }
+
+        env.events().publish(
+            (symbol_short!("quote"), symbol_short!("accepted"), quote_id),
+            QuoteReceivedEvent { quote_id, receiver, timestamp: env.ledger().timestamp() },
+        );
+        quote
+    }
+
     // -----------------------------------------------------------------------
     // Session-aware attestation
     // -----------------------------------------------------------------------
@@ -3654,6 +3746,163 @@ impl AnchorKitContract {
         active
     }
 
+    // -----------------------------------------------------------------------
+    // Anchor Blacklist Management (#296)
+    // -----------------------------------------------------------------------
+
+    /// Add an anchor to the blacklist.
+    ///
+    /// Blacklisted anchors are excluded from routing and quote selection.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `anchor` - Address of the anchor to blacklist.
+    /// * `reason` - Reason for blacklisting.
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin privileges.
+    pub fn blacklist_anchor(env: Env, anchor: Address, reason: String) {
+        Self::require_admin(&env);
+        let entry = AnchorBlacklistEntry {
+            anchor: anchor.clone(),
+            reason,
+            blacklisted_at: env.ledger().timestamp(),
+        };
+        let key = anchor_blacklist_key(&env, &anchor);
+        env.storage().persistent().set(&key, &entry);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+        env.events().publish(
+            (symbol_short!("anchor"), symbol_short!("blacklist")),
+            anchor,
+        );
+    }
+
+    /// Remove an anchor from the blacklist.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `anchor` - Address of the anchor to remove from blacklist.
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin privileges.
+    pub fn remove_from_blacklist(env: Env, anchor: Address) {
+        Self::require_admin(&env);
+        let key = anchor_blacklist_key(&env, &anchor);
+        env.storage().persistent().remove(&key);
+        env.events().publish(
+            (symbol_short!("anchor"), symbol_short!("unblacklist")),
+            anchor,
+        );
+    }
+
+    /// Check if an anchor is blacklisted.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `anchor` - Address to check.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the anchor is blacklisted, `false` otherwise.
+    pub fn is_anchor_blacklisted(env: Env, anchor: Address) -> bool {
+        let key = anchor_blacklist_key(&env, &anchor);
+        env.storage()
+            .persistent()
+            .get::<_, AnchorBlacklistEntry>(&key)
+            .is_some()
+    }
+
+    // -----------------------------------------------------------------------
+    // Anchor Cluster Management (#296)
+    // -----------------------------------------------------------------------
+
+    /// Create a new anchor cluster.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `cluster_id` - Unique identifier for the cluster.
+    /// * `name` - Human-readable name for the cluster.
+    /// * `anchors` - Initial list of anchors in the cluster.
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin privileges.
+    pub fn create_anchor_cluster(env: Env, cluster_id: String, name: String, anchors: Vec<Address>) {
+        Self::require_admin(&env);
+        let cluster = AnchorCluster {
+            cluster_id: cluster_id.clone(),
+            name,
+            anchors,
+            created_at: env.ledger().timestamp(),
+        };
+        let key = anchor_cluster_key(&env, &cluster_id);
+        env.storage().persistent().set(&key, &cluster);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        // Add to cluster list
+        let list_key = anchor_cluster_list_key(&env);
+        let mut cluster_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&list_key)
+            .unwrap_or_else(|| Vec::new(&env));
+        cluster_ids.push_back(cluster_id);
+        env.storage().persistent().set(&list_key, &cluster_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&list_key, PERSISTENT_TTL, PERSISTENT_TTL);
+
+        env.events().publish(
+            (symbol_short!("cluster"), symbol_short!("created")),
+            (),
+        );
+    }
+
+    /// Get a cluster by ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `cluster_id` - The cluster identifier.
+    ///
+    /// # Returns
+    ///
+    /// The [`AnchorCluster`] if found.
+    pub fn get_anchor_cluster(env: Env, cluster_id: String) -> AnchorCluster {
+        let key = anchor_cluster_key(&env, &cluster_id);
+        env.storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotFound))
+    }
+
+    /// List all anchor clusters.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// Vector of cluster IDs.
+    pub fn list_anchor_clusters(env: Env) -> Vec<String> {
+        let list_key = anchor_cluster_list_key(&env);
+        env.storage()
+            .persistent()
+            .get(&list_key)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     pub fn route_transaction(env: Env, options: RoutingOptions) -> Quote {
         validate_currency_code(&env, &options.request.base_asset);
         validate_currency_code(&env, &options.request.quote_asset);
@@ -3666,6 +3915,11 @@ impl AnchorKitContract {
         // Collect valid quotes from active anchors
         let mut candidates: Vec<Quote> = Vec::new(&env);
         for anchor in anchors.iter() {
+            // #296: Skip blacklisted anchors
+            if Self::is_anchor_blacklisted(env.clone(), anchor.clone()) {
+                continue;
+            }
+
             // Check reputation filter
             let meta: RoutingAnchorMeta = match env.storage().persistent().get(&anchor_meta_key(&env, &anchor)) {
                 Some(m) => m,
