@@ -2,11 +2,12 @@ WASM_TARGET := wasm32-unknown-unknown
 WASM_OUT    := target/$(WASM_TARGET)/release/anchorkit.wasm
 VERSION     := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
 DIST_DIR    := dist
+SOURCE_DATE_EPOCH ?= 1717200000
 
 .PHONY: build test wasm lint \
         integration-test integration-test-live \
         release release-validate \
-        clean-dist
+        clean-dist reproducible-wasm verify-reproducible
 
 # ── Core build targets ────────────────────────────────────────────────────────
 
@@ -19,6 +20,15 @@ test:
 wasm:
 	cargo build --release --target $(WASM_TARGET) --no-default-features --features wasm
 	@ls -lh $(WASM_OUT)
+
+# ── Reproducible build targets ─────────────────────────────────────────────────
+
+reproducible-wasm:
+	@SOURCE_DATE_EPOCH=$(SOURCE_DATE_EPOCH) cargo build --release --target $(WASM_TARGET) --no-default-features --features wasm
+	@ls -lh $(WASM_OUT)
+
+verify-reproducible:
+	@bash scripts/verify_reproducible_build.sh
 
 # Formatting
 fmt:

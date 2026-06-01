@@ -333,6 +333,12 @@ impl WeightedRoutingStrategy {
 // ---------------------------------------------------------------------------
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompliancePolicy {
+    pub minimum_score: Option<u32>,
+}
+
+#[contracttype]
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[repr(u32)]
 pub enum KycStatus {
@@ -349,6 +355,7 @@ pub struct ComplianceCheck {
     pub subject: Address,
     pub check_type: String,
     pub result: u32,
+    pub score: Option<u32>,
     pub timestamp: u64,
 }
 
@@ -578,6 +585,15 @@ impl CacheConfig {
             metadata_ttl_seconds: 3_600,
             capabilities_ttl_seconds: 21_600,
             swr_ttl_seconds: 300,
+        }
+    }
+}
+
+impl CompliancePolicy {
+    /// Default compliance policy with no minimum score requirement.
+    pub fn default_policy() -> Self {
+        CompliancePolicy {
+            minimum_score: None,
         }
     }
 }
@@ -1431,6 +1447,48 @@ impl AnchorKitContract {
 
     fn cache_config_key(env: &Env) -> soroban_sdk::Vec<soroban_sdk::Symbol> {
         soroban_sdk::vec![env, symbol_short!("CACHCFG")]
+    }
+
+    fn compliance_policy_key(env: &Env) -> soroban_sdk::Vec<soroban_sdk::Symbol> {
+        soroban_sdk::vec![env, symbol_short!("COMPPOL")]
+    }
+
+    /// Set the global compliance policy.
+    ///
+    /// Configures minimum score requirements for compliance checks.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `policy` - A [`CompliancePolicy`] struct with:
+    ///   - `minimum_score` - Optional minimum score requirement for compliance checks
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin authorization.
+    pub fn set_compliance_policy(env: Env, policy: CompliancePolicy) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&Self::compliance_policy_key(&env), &policy);
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
+    /// Get the current global compliance policy.
+    ///
+    /// Returns the active compliance policy, or the default policy if no
+    /// configuration has been set.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// A [`CompliancePolicy`] struct with the current policy settings.
+    pub fn get_compliance_policy(env: Env) -> CompliancePolicy {
+        env.storage()
+            .instance()
+            .get::<_, CompliancePolicy>(&Self::compliance_policy_key(&env))
+            .unwrap_or_else(CompliancePolicy::default_policy)
     }
 
     /// Set the global cache configuration.
@@ -3007,6 +3065,7 @@ impl AnchorKitContract {
         subject: Address,
         check_type: String,
         passed: bool,
+        score: Option<u32>,
     ) {
         Self::require_admin(&env);
         let now = env.ledger().timestamp();
@@ -3014,6 +3073,7 @@ impl AnchorKitContract {
             subject: subject.clone(),
             check_type: check_type.clone(),
             result: if passed { 1u32 } else { 0u32 },
+            score,
             timestamp: now,
         };
         let key = compliance_check_key(&env, &subject, &check_type);
