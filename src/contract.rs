@@ -2932,7 +2932,7 @@ impl AnchorKitContract {
         env.storage().persistent().set(&used_key, &timestamp);
         env.storage().persistent().extend_ttl(&used_key, REPLAY_TTL, REPLAY_TTL);
 
-        let now = env.ledger().timestamp();
+        let _now = env.ledger().timestamp();
         env.events().publish(
             (symbol_short!("attest"), symbol_short!("recorded"), id, subject),
             AttestEvent { payload_hash: payload_hash.clone(), timestamp },
