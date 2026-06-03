@@ -94,6 +94,12 @@ pub enum ErrorCode {
     CacheExpired              = 48,
     CacheNotFound             = 49,
 
+    // Capacity errors (54–55)
+    /// Maximum number of registered attestors exceeded
+    AttestorCapacityExceeded  = 54,
+    /// Maximum number of cache entries exceeded
+    CacheCapacityExceeded     = 55,
+
     // Profile / metadata validation errors (50–52)
     /// Attestor profile not found (no profile record exists yet).
     AttestorProfileNotFound   = 50,
@@ -156,6 +162,8 @@ impl ErrorCode {
             ErrorCode::InvalidWeights                  => "Routing weights must sum to 1.0",
             ErrorCode::CacheExpired              => "Cache entry has expired",
             ErrorCode::CacheNotFound             => "Cache entry not found",
+            ErrorCode::AttestorCapacityExceeded  => "Maximum number of registered attestors exceeded",
+            ErrorCode::CacheCapacityExceeded     => "Maximum number of cache entries exceeded",
             ErrorCode::AttestorProfileNotFound   => "Attestor profile not found",
             ErrorCode::InvalidRequestContext     => "Request context is invalid",
             ErrorCode::InvalidSessionMetadata    => "Session metadata is invalid",
@@ -327,6 +335,8 @@ impl AnchorKitError {
     pub fn unauthorized() -> Self { Self::from_code(ErrorCode::Unauthorized) }
     pub fn cache_expired() -> Self { Self::from_code(ErrorCode::CacheExpired) }
     pub fn cache_not_found() -> Self { Self::from_code(ErrorCode::CacheNotFound) }
+    pub fn attestor_capacity_exceeded() -> Self { Self::from_code(ErrorCode::AttestorCapacityExceeded) }
+    pub fn cache_capacity_exceeded() -> Self { Self::from_code(ErrorCode::CacheCapacityExceeded) }
     pub fn attestor_profile_not_found() -> Self { Self::from_code(ErrorCode::AttestorProfileNotFound) }
     pub fn invalid_request_context() -> Self { Self::from_code(ErrorCode::InvalidRequestContext) }
     pub fn invalid_session_metadata() -> Self { Self::from_code(ErrorCode::InvalidSessionMetadata) }

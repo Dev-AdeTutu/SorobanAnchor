@@ -587,6 +587,24 @@ impl CacheConfig {
     }
 }
 
+/// Capacity limits for registrations and caches.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapacityConfig {
+    pub max_attestors: u64,
+    pub max_cache_entries: u64,
+}
+
+impl CapacityConfig {
+    /// Sensible production defaults: 1000 attestors, 10000 cache entries.
+    pub fn default_config() -> Self {
+        CapacityConfig {
+            max_attestors: 1000,
+            max_cache_entries: 10000,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // #348 — Anchor health and service readiness types
 // ---------------------------------------------------------------------------
@@ -1543,6 +1561,93 @@ impl AnchorKitContract {
         if override_ttl != 0 { override_ttl } else { configured }
     }
 
+    // -----------------------------------------------------------------------
+    // Capacity configuration and counters
+    // -----------------------------------------------------------------------
+
+    fn capacity_config_key(env: &Env) -> soroban_sdk::Vec<soroban_sdk::Symbol> {
+        soroban_sdk::vec![env, symbol_short!("CAPCFG")]
+    }
+
+    fn attestor_count_key(env: &Env) -> soroban_sdk::Vec<soroban_sdk::Symbol> {
+        soroban_sdk::vec![env, symbol_short!("ATCNT")]
+    }
+
+    fn cache_count_key(env: &Env) -> soroban_sdk::Vec<soroban_sdk::Symbol> {
+        soroban_sdk::vec![env, symbol_short!("CACNT")]
+    }
+
+    /// Set the global capacity configuration.
+    ///
+    /// Configures maximum limits for registered attestors and cache entries.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    /// * `config` - A [`CapacityConfig`] struct with:
+    ///   - `max_attestors` - maximum number of registered attestors
+    ///   - `max_cache_entries` - maximum number of cache entries
+    ///
+    /// # Authorization
+    ///
+    /// Requires admin authorization.
+    pub fn set_capacity_config(env: Env, config: CapacityConfig) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&Self::capacity_config_key(&env), &config);
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+    }
+
+    /// Get the current global capacity configuration.
+    ///
+    /// Returns the active capacity limits, or sensible production defaults if no
+    /// configuration has been set.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// A [`CapacityConfig`] struct with the current capacity limits.
+    pub fn get_capacity_config(env: Env) -> CapacityConfig {
+        env.storage()
+            .instance()
+            .get::<_, CapacityConfig>(&Self::capacity_config_key(&env))
+            .unwrap_or_else(CapacityConfig::default_config)
+    }
+
+    /// Get the current number of registered attestors.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// The current number of registered attestors.
+    pub fn get_attestor_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get::<_, u64>(&Self::attestor_count_key(&env))
+            .unwrap_or(0)
+    }
+
+    /// Get the current number of cache entries.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment context.
+    ///
+    /// # Returns
+    ///
+    /// The current number of cache entries.
+    pub fn get_cache_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get::<_, u64>(&Self::cache_count_key(&env))
+            .unwrap_or(0)
+    }
+
     fn refresh_diagnostic_key(
         env: &Env,
         anchor: &Address,
@@ -1843,6 +1948,14 @@ impl AnchorKitContract {
     pub fn register_attestor(env: Env, attestor: Address, sep10_token: String, sep10_issuer: Address, public_key: BytesN<32>) {
         Self::require_admin(&env);
         Self::verify_sep10_token_matches_attestor(&env, &sep10_token, &sep10_issuer, &attestor);
+        
+        // Check capacity
+        let config = Self::get_capacity_config(env.clone());
+        let current_count = Self::get_attestor_count(env.clone());
+        if current_count >= config.max_attestors {
+            panic_with_error!(&env, ErrorCode::AttestorCapacityExceeded);
+        }
+        
         let xdr = attestor.clone().to_xdr(&env);
         let raw = xdr_to_vec(&xdr);
         let key = make_storage_key(&env, &[b"ATTESTOR", &raw]);
@@ -1858,6 +1971,11 @@ impl AnchorKitContract {
         env.storage()
             .persistent()
             .extend_ttl(&pk_key, PERSISTENT_TTL, PERSISTENT_TTL);
+        
+        // Increment count
+        env.storage().instance().set(&Self::attestor_count_key(&env), &(current_count + 1));
+        env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+        
         env.events().publish(
             (symbol_short!("attestor"), symbol_short!("added"), attestor),
             (),
@@ -1910,6 +2028,14 @@ impl AnchorKitContract {
         env.storage().persistent().remove(&key);
         let pk_key = make_storage_key(&env, &[b"ATPUBKEY", &raw]);
         env.storage().persistent().remove(&pk_key);
+        
+        // Decrement count
+        let current_count = Self::get_attestor_count(env.clone());
+        if current_count > 0 {
+            env.storage().instance().set(&Self::attestor_count_key(&env), &(current_count - 1));
+            env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+        }
+        
         env.events().publish(
             (symbol_short!("attestor"), symbol_short!("removed"), attestor),
             (),
@@ -3850,6 +3976,18 @@ impl AnchorKitContract {
 
     pub fn cache_metadata(env: Env, anchor: Address, metadata: AnchorMetadata, ttl_seconds: u64) {
         Self::require_admin(&env);
+        let key = (symbol_short!("METACACHE"), anchor.clone());
+        let entry_exists = env.storage().temporary().has(&key);
+        
+        // Check capacity only if adding a new entry
+        if !entry_exists {
+            let config = Self::get_capacity_config(env.clone());
+            let current_count = Self::get_cache_count(env.clone());
+            if current_count >= config.max_cache_entries {
+                panic_with_error!(&env, ErrorCode::CacheCapacityExceeded);
+            }
+        }
+        
         let now = env.ledger().timestamp();
         let cfg = Self::get_cache_config(env.clone());
         let ttl = Self::effective_ttl(ttl_seconds, cfg.metadata_ttl_seconds);
@@ -3860,10 +3998,16 @@ impl AnchorKitContract {
             stale_ttl_seconds: 0,
             needs_refresh: false,
         };
-        let key = (symbol_short!("METACACHE"), anchor.clone());
         let ledger_ttl = if ttl as u32 > MIN_TEMP_TTL { ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
+        
+        // Increment count if new entry
+        if !entry_exists {
+            let current_count = Self::get_cache_count(env.clone());
+            env.storage().instance().set(&Self::cache_count_key(&env), &(current_count + 1));
+            env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+        }
     }
 
     pub fn get_cached_metadata(env: Env, anchor: Address) -> AnchorMetadata {
@@ -3902,6 +4046,18 @@ impl AnchorKitContract {
         stale_ttl_seconds: u64,
     ) {
         Self::require_admin(&env);
+        let key = (symbol_short!("METACACHE"), anchor.clone());
+        let entry_exists = env.storage().temporary().has(&key);
+        
+        // Check capacity only if adding a new entry
+        if !entry_exists {
+            let config = Self::get_capacity_config(env.clone());
+            let current_count = Self::get_cache_count(env.clone());
+            if current_count >= config.max_cache_entries {
+                panic_with_error!(&env, ErrorCode::CacheCapacityExceeded);
+            }
+        }
+        
         let now = env.ledger().timestamp();
         let cfg = Self::get_cache_config(env.clone());
         let ttl = Self::effective_ttl(ttl_seconds, cfg.metadata_ttl_seconds);
@@ -3913,11 +4069,17 @@ impl AnchorKitContract {
             stale_ttl_seconds: stale,
             needs_refresh: false,
         };
-        let key = (symbol_short!("METACACHE"), anchor.clone());
         let total_ttl = ttl.saturating_add(stale);
         let ledger_ttl = if total_ttl as u32 > MIN_TEMP_TTL { total_ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
+        
+        // Increment count if new entry
+        if !entry_exists {
+            let current_count = Self::get_cache_count(env.clone());
+            env.storage().instance().set(&Self::cache_count_key(&env), &(current_count + 1));
+            env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+        }
     }
 
     /// Retrieve a metadata entry using the stale-while-revalidate policy.
@@ -4062,14 +4224,32 @@ impl AnchorKitContract {
 
     pub fn cache_capabilities(env: Env, anchor: Address, toml_url: String, capabilities: String, ttl_seconds: u64) {
         Self::require_admin(&env);
+        let key = (symbol_short!("CAPCACHE"), anchor.clone());
+        let entry_exists = env.storage().temporary().has(&key);
+        
+        // Check capacity only if adding a new entry
+        if !entry_exists {
+            let config = Self::get_capacity_config(env.clone());
+            let current_count = Self::get_cache_count(env.clone());
+            if current_count >= config.max_cache_entries {
+                panic_with_error!(&env, ErrorCode::CacheCapacityExceeded);
+            }
+        }
+        
         let now = env.ledger().timestamp();
         let cfg = Self::get_cache_config(env.clone());
         let ttl = Self::effective_ttl(ttl_seconds, cfg.capabilities_ttl_seconds);
         let entry = CapabilitiesCache { toml_url, capabilities, cached_at: now, ttl_seconds: ttl };
-        let key = (symbol_short!("CAPCACHE"), anchor.clone());
         let ledger_ttl = if ttl as u32 > MIN_TEMP_TTL { ttl as u32 } else { MIN_TEMP_TTL };
         env.storage().temporary().set(&key, &entry);
         env.storage().temporary().extend_ttl(&key, ledger_ttl, ledger_ttl);
+        
+        // Increment count if new entry
+        if !entry_exists {
+            let current_count = Self::get_cache_count(env.clone());
+            env.storage().instance().set(&Self::cache_count_key(&env), &(current_count + 1));
+            env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
+        }
     }
 
     pub fn get_cached_capabilities(env: Env, anchor: Address) -> CapabilitiesCache {
