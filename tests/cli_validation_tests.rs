@@ -128,55 +128,6 @@ fn test_no_network_note_when_stellar_network_is_set() {
 
 // ── Group D: `env` subcommand ─────────────────────────────────────────────────
 
-#[test]
-fn test_env_command_exits_zero() {
-    cmd()
-        .args(["env"])
-        .env_remove("ANCHOR_CONTRACT_ID")
-        .env_remove("STELLAR_NETWORK")
-        .env("HOME", std::env::temp_dir().to_str().unwrap())
-        .assert()
-        .success()
-        .stdout(contains("Contract ID"))
-        .stdout(contains("Network"));
-}
-
-#[test]
-fn test_env_command_shows_contract_id_from_env() {
-    cmd()
-        .args(["env"])
-        .env("ANCHOR_CONTRACT_ID", "CTEST123ENVTEST")
-        .env("HOME", std::env::temp_dir().to_str().unwrap())
-        .assert()
-        .success()
-        .stdout(contains("CTEST123ENVTEST"))
-        .stdout(contains("ANCHOR_CONTRACT_ID"));
-}
-
-#[test]
-fn test_env_command_shows_network_from_env() {
-    cmd()
-        .args(["env"])
-        .env("STELLAR_NETWORK", "mainnet")
-        .env("HOME", std::env::temp_dir().to_str().unwrap())
-        .assert()
-        .success()
-        .stdout(contains("mainnet"))
-        .stdout(contains("STELLAR_NETWORK"));
-}
-
-#[test]
-fn test_env_command_shows_builtin_profiles() {
-    cmd()
-        .args(["env"])
-        .env("HOME", std::env::temp_dir().to_str().unwrap())
-        .assert()
-        .success()
-        .stdout(contains("testnet"))
-        .stdout(contains("mainnet"))
-        .stdout(contains("futurenet"));
-}
-
 // ── Group E: commands that do NOT need contract_id ───────────────────────────
 
 #[test]

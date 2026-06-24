@@ -9,9 +9,9 @@ numeric `ErrorCode`, a human-readable `message`, and an optional `context` strin
 |--------|---------------------------------------|
 |  1–10  | Auth / attestor errors                |
 | 11–19  | Validation / quote / flow errors      |
-| 20–29  | KYC / webhook / state errors          |
+| 20–31  | KYC / webhook / state / session errors |
 | 48–49  | Cache errors                          |
-| 50–52  | Profile / metadata validation errors  |
+| 50–55  | Profile / metadata / capacity errors   |
 
 ---
 
@@ -59,6 +59,17 @@ numeric `ErrorCode`, a human-readable `message`, and an optional `context` strin
 | 24   | `IllegalTransition`      | Illegal transaction state transition         | `TransactionStateTracker::transition`          |
 | 25   | `SessionExpired`         | Session has expired                          | Session-gated calls after TTL                  |
 | 26   | `SessionClosed`          | Session is closed                            | Session-gated calls on a closed session        |
+| 27   | `UnsupportedCapabilityVersion` | Service capability version is unsupported | `configure_services_versioned`               |
+| 28   | `Unauthorized`           | Caller is not authorized                   | Admin-gated operations from non-admin         |
+
+---
+
+## Session / routing errors (30–31)
+
+| Code | Variant                    | Message                              | Raised by                                      |
+|------|----------------------------|--------------------------------------|------------------------------------------------|
+| 30   | `SessionOperationLimitExceeded` | Session operation limit exceeded | Session-gated calls exceeding max operations  |
+| 31   | `InvalidWeights`           | Routing weights must sum to 1.0      | `route_transaction` with invalid weights      |
 
 ---
 
@@ -71,13 +82,16 @@ numeric `ErrorCode`, a human-readable `message`, and an optional `context` strin
 
 ---
 
-## Profile / metadata validation errors (50–52)
+## Profile / metadata validation errors (50–55)
 
 | Code | Variant                    | Message                              | Raised by                                          |
 |------|----------------------------|--------------------------------------|----------------------------------------------------|
 | 50   | `AttestorProfileNotFound`  | Attestor profile not found           | `get_attestor_profile` before any profile write    |
 | 51   | `InvalidRequestContext`    | Request context is invalid           | `create_request_context` with empty/zero fields    |
 | 52   | `InvalidSessionMetadata`   | Session metadata is invalid          | Session creation with malformed operation context  |
+| 53   | `InvalidAssetCode`         | Asset code is invalid                | Asset-related operations with bad code format     |
+| 54   | `AttestorCapacityExceeded` | Attestor capacity has been exceeded  | Attestor registration beyond capacity limits      |
+| 55   | `CacheCapacityExceeded`    | Cache capacity has been exceeded     | Caching beyond capacity limits                    |
 
 ---
 

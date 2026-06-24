@@ -36,7 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "1d8d2474cfc4f291b956a02a620ba62e87ab9cd633af82ca3f73c9d97c6c980e"
+                  "bytes": "c801dffd509a387692d07a3e6e4506e4b2367d98f9f83926720033c8653709c3"
                 }
               ]
             }
@@ -58,13 +58,13 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJDQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBSEszTSIsImV4cCI6ODc0MDAsImlzcyI6Imh0dHBzOi8vYW5jaG9yLmV4YW1wbGUuY29tIn0.jYeDGUKApq8xAyJgTc3YSkCFMif038JH4b_RTQTea9lYmykLz55V-VV3-Ul1CLR15X1vPfabucfYcMhO4N9UBw"
+                  "string": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJDQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBSEszTSIsImV4cCI6ODc0MDAsImlzcyI6Imh0dHBzOi8vYW5jaG9yLmV4YW1wbGUuY29tIn0.-puKO8jUVSD-dhZNjNNis2iAbb6pbdwzz5R5_gEE7pJByxoeKRdtuEqjwLu1xun-VByZTGFMqy8DGYxECjYDDA"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "1d8d2474cfc4f291b956a02a620ba62e87ab9cd633af82ca3f73c9d97c6c980e"
+                  "bytes": "c801dffd509a387692d07a3e6e4506e4b2367d98f9f83926720033c8653709c3"
                 }
               ]
             }
@@ -127,7 +127,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "1d8d2474cfc4f291b956a02a620ba62e87ab9cd633af82ca3f73c9d97c6c980e"
+                  "bytes": "c801dffd509a387692d07a3e6e4506e4b2367d98f9f83926720033c8653709c3"
                 }
               }
             },
@@ -196,6 +196,26 @@
                         },
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                        }
+                      },
+                      {
+                        "key": {
+                          "bytes": "63ef827fa346569aa23c71ac943d453b695209ec9b909bfbdf941e1599c44b78"
+                        },
+                        "val": {
+                          "u32": 1
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ATCNT"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
                         }
                       }
                     ]
@@ -435,7 +455,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "1d8d2474cfc4f291b956a02a620ba62e87ab9cd633af82ca3f73c9d97c6c980e"
+                  "bytes": "c801dffd509a387692d07a3e6e4506e4b2367d98f9f83926720033c8653709c3"
                 }
               ]
             }
@@ -489,13 +509,13 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJDQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBSEszTSIsImV4cCI6ODc0MDAsImlzcyI6Imh0dHBzOi8vYW5jaG9yLmV4YW1wbGUuY29tIn0.jYeDGUKApq8xAyJgTc3YSkCFMif038JH4b_RTQTea9lYmykLz55V-VV3-Ul1CLR15X1vPfabucfYcMhO4N9UBw"
+                  "string": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJDQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBSEszTSIsImV4cCI6ODc0MDAsImlzcyI6Imh0dHBzOi8vYW5jaG9yLmV4YW1wbGUuY29tIn0.-puKO8jUVSD-dhZNjNNis2iAbb6pbdwzz5R5_gEE7pJByxoeKRdtuEqjwLu1xun-VByZTGFMqy8DGYxECjYDDA"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "bytes": "1d8d2474cfc4f291b956a02a620ba62e87ab9cd633af82ca3f73c9d97c6c980e"
+                  "bytes": "c801dffd509a387692d07a3e6e4506e4b2367d98f9f83926720033c8653709c3"
                 }
               ]
             }

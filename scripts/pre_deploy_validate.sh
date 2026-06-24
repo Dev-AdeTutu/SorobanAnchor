@@ -5,9 +5,10 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCHEMA_FILE="$SCRIPT_DIR/config_schema.json"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+SCHEMA_FILE="$PROJECT_ROOT/config_schema.json"
 VALIDATOR="$SCRIPT_DIR/validate_config_strict.py"
-CONFIGS_DIR="$SCRIPT_DIR/configs"
+CONFIGS_DIR="$PROJECT_ROOT/configs"
 
 echo "🔍 AnchorKit Pre-Deployment Validation"
 echo "========================================"

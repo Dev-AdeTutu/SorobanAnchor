@@ -203,6 +203,14 @@
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                         }
+                      },
+                      {
+                        "key": {
+                          "bytes": "63ef827fa346569aa23c71ac943d453b695209ec9b909bfbdf941e1599c44b78"
+                        },
+                        "val": {
+                          "u32": 1
+                        }
                       }
                     ]
                   }

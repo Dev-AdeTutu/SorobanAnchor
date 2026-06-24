@@ -41,7 +41,7 @@ use soroban_sdk::{
 };
 
 use anchorkit::contract::{
-    AnchorKitContract, AnchorKitContractClient, SERVICE_DEPOSITS, SERVICE_QUOTES,
+    AdminRole, AnchorKitContract, AnchorKitContractClient, SERVICE_DEPOSITS, SERVICE_QUOTES,
     SERVICE_WITHDRAWALS,
 };
 
@@ -273,10 +273,13 @@ fn harness_step5_session_workflow() {
     setup_ledger(&env, 1_000_000);
 
     let (client, _admin) = deploy_and_initialize(&env);
-    let user = Address::generate(&env);
     let attestor = Address::generate(&env);
     let subject = Address::generate(&env);
     let key = SigningKey::generate(&mut OsRng);
+
+    // Grant the user AttestorAdmin role first.
+    let user = Address::generate(&env);
+    client.grant_role(&user, &AdminRole::AttestorAdmin);
 
     // Create session.
     let session_id = client.create_session(&user);

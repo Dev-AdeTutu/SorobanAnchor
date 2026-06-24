@@ -319,5 +319,5 @@ assert_eq!(attestation.issuer, expected_issuer);
 ## References
 
 - [Soroban Contract Upgrades](https://developers.stellar.org/docs/learn/storing-data)
-- [Schema Versioning](../docs/schema-versioning.md)
-- [Audit Logging](../docs/audit-logging.md)
+- [Admin Audit Log](./admin-audit-log.md)
+- [Governance and Security](./governance-and-security.md)

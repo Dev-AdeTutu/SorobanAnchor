@@ -4,9 +4,11 @@
 # Validates with ajv-cli if available, otherwise falls back to validate_config_strict.py.
 set -euo pipefail
 
-SCHEMA="config_schema.json"
-CONFIGS_DIR="configs"
-VALIDATOR_PY="validate_config_strict.py"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+SCHEMA="$PROJECT_ROOT/config_schema.json"
+CONFIGS_DIR="$PROJECT_ROOT/configs"
+VALIDATOR_PY="$SCRIPT_DIR/validate_config_strict.py"
 FAILED=0
 
 # ── helpers ────────────────────────────────────────────────────────────────────

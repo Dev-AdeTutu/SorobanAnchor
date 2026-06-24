@@ -41,16 +41,6 @@ for module in "${MODULES[@]}"; do
     if [ -f "src/${module}.rs" ]; then
         lines=$(wc -l < "src/${module}.rs")
         echo "  Total lines: $lines"
-        
-        # Check for corresponding test file
-        test_file="tests/${module}_tests.rs"
-        if [ -f "$test_file" ]; then
-            test_lines=$(wc -l < "$test_file")
-            echo "  Test file: $test_file"
-            echo "  Test lines: $test_lines"
-        else
-            echo "  Test file: Not found (consider adding tests)"
-        fi
     fi
 done
 

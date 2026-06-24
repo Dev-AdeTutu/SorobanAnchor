@@ -965,7 +965,8 @@ Configure rate limiting for KYC submissions.
 | 24 | IllegalTransition | Illegal transaction state transition |
 | 25 | SessionExpired | Session has expired |
 | 26 | SessionClosed | Session is closed |
-| 29 | UnsupportedCapabilityVersion | Service capability version is unsupported |
+| 27 | UnsupportedCapabilityVersion | Service capability version is unsupported |
+| 28 | Unauthorized | Caller is not authorized |
 | 30 | SessionOperationLimitExceeded | Session operation limit exceeded |
 | 31 | InvalidWeights | Routing weights must sum to 1.0 |
 | 48 | CacheExpired | Cache entry has expired |
@@ -974,3 +975,5 @@ Configure rate limiting for KYC submissions.
 | 51 | InvalidRequestContext | Request context is invalid |
 | 52 | InvalidSessionMetadata | Session metadata is invalid |
 | 53 | InvalidAssetCode | Asset code is invalid |
+| 54 | AttestorCapacityExceeded | Attestor capacity has been exceeded |
+| 55 | CacheCapacityExceeded | Cache capacity has been exceeded |

@@ -1,8 +1,10 @@
 #![cfg(test)]
 
+mod sep10_test_util;
+
 mod capacity_limits_tests {
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
+        testutils::{Address as _, Ledger, LedgerInfo},
         Address, Env, String,
     };
 

@@ -363,4 +363,4 @@ cargo test service_management_tests -- --nocapture
 - [Service Management API](../src/service_management.rs)
 - [Service Management Tests](../tests/service_management_tests.rs)
 - [Admin Audit Log](./admin-audit-log.md)
-- [Contract Architecture](./contract-architecture.md)
+- [Governance and Security](./governance-and-security.md)

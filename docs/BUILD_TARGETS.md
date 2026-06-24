@@ -5,8 +5,6 @@ This document describes all available build targets for AnchorKit. Use these tar
 ## Quick Reference
 
 ```bash
-make help              # Show all available targets
-make check             # Run all quality checks before committing
 make fmt               # Auto-fix code formatting
 make lint              # Run linting checks
 make test              # Run all tests
@@ -103,19 +101,6 @@ make fmt-check
 - 0 = All files properly formatted
 - 1 = Formatting issues found
 
-### `make fmt-wasm`
-
-Auto-fix formatting for WASM-specific code.
-
-```bash
-make fmt-wasm
-```
-
-**What it does:**
-- Formats only WASM-related source files
-- Targets: `src/contract.rs`, `src/deterministic_hash.rs`
-- Useful for focused formatting of on-chain code
-
 ## Linting Targets (clippy)
 
 ### `make lint`
@@ -133,95 +118,6 @@ make lint
 - Enables all features for comprehensive checking
 
 **Configuration:** See `.clippy.toml` for linting rules
-
-### `make lint-all`
-
-Run clippy on all targets with all features (same as `make lint`).
-
-```bash
-make lint-all
-```
-
-**What it does:**
-- Identical to `make lint`
-- Explicit target for clarity
-
-### `make lint-native`
-
-Run clippy on native targets only (no WASM).
-
-```bash
-make lint-native
-```
-
-**What it does:**
-- Runs `cargo clippy --lib --bins --tests --examples -- -D warnings`
-- Checks library, binaries, tests, and examples
-- Excludes WASM target
-- Useful for quick native-only checks
-
-### `make lint-wasm`
-
-Run clippy on WASM target only.
-
-```bash
-make lint-wasm
-```
-
-**What it does:**
-- Runs `cargo clippy --target wasm32-unknown-unknown --no-default-features --features wasm -- -D warnings`
-- Checks only WASM-specific code
-- Disables default features (std)
-- Enables `wasm` feature
-- Useful for on-chain code validation
-
-## Combined Quality Targets
-
-### `make check`
-
-Run all quality checks (formatting, linting, tests).
-
-```bash
-make check
-```
-
-**What it does:**
-1. Runs `make fmt-check` — Verify formatting
-2. Runs `make lint` — Run linting checks
-3. Runs `make test` — Run all tests
-
-**When to use:** Before committing or pushing code
-
-**Exit codes:**
-- 0 = All checks passed
-- 1 = Any check failed
-
-### `make check-wasm`
-
-Run quality checks for WASM target.
-
-```bash
-make check-wasm
-```
-
-**What it does:**
-1. Runs `make fmt-check` — Verify formatting
-2. Runs `make lint-wasm` — Run WASM linting
-
-**When to use:** Before committing WASM-specific changes
-
-## Help Target
-
-### `make help`
-
-Display all available targets with descriptions.
-
-```bash
-make help
-```
-
-**Output:**
-Shows formatted list of all targets with usage examples.
 
 ## Quality Check Scripts
 

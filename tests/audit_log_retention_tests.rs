@@ -59,7 +59,10 @@ mod audit_log_retention_tests {
         set_ledger(env, ts);
         let session_id = client.create_session(attestor);
         let subject = Address::generate(env);
-        let payload = soroban_sdk::Bytes::from_slice(env, b"payload_hash_32bytes_exactly____");
+        let mut buf = [0u8; 32];
+        buf[..16].copy_from_slice(b"payload_hash_32b");
+        buf[16..24].copy_from_slice(&ts.to_be_bytes());
+        let payload = soroban_sdk::Bytes::from_slice(env, &buf);
         let sig = sign_payload(env, sk, &payload);
         client.submit_attestation_with_session(
             &session_id, attestor, &subject, &ts, &payload, &sig,
@@ -177,7 +180,10 @@ mod audit_log_retention_tests {
         let session_id = client.create_session(&attestor);
 
         let subject = Address::generate(&env);
-        let payload = soroban_sdk::Bytes::from_slice(&env, b"payload_hash_32bytes_exactly____");
+        let mut buf = [0u8; 32];
+        buf[..16].copy_from_slice(b"payload_hash_32b");
+        buf[16..24].copy_from_slice(&2000u64.to_be_bytes());
+        let payload = soroban_sdk::Bytes::from_slice(&env, &buf);
         let sig = sign_payload(&env, &sk, &payload);
         client.submit_attestation_with_session(
             &session_id, &attestor, &subject, &2000u64, &payload, &sig,

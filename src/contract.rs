@@ -1191,6 +1191,8 @@ impl AnchorKitContract {
         env.storage().persistent().set(&init_key, &true);
         env.storage().persistent().extend_ttl(&init_key, PERSISTENT_TTL, PERSISTENT_TTL);
         env.storage().instance().set(&admin_key(&env), &admin);
+        let schema_key = make_storage_key(&env, &[b"SCHEMAVER"]);
+        env.storage().instance().set(&schema_key, &SCHEMA_V1);
         env.storage().instance().extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
     }
 
@@ -2608,9 +2610,11 @@ impl AnchorKitContract {
     /// let version = AnchorKitContract::get_service_capability_version(env, anchor);
     /// ```
     pub fn get_service_capability_version(env: Env, anchor: Address) -> u32 {
+        let xdr = anchor.clone().to_xdr(&env);
+        let raw = xdr_to_vec(&xdr);
         env.storage()
             .persistent()
-            .get::<_, AnchorServices>(&(symbol_short!("SERVICES"), anchor))
+            .get::<_, AnchorServices>(&make_storage_key(&env, &[b"SERVICES", &raw]))
             .map(|r| r.service_capability_version)
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::ServicesNotConfigured))
     }
@@ -5504,9 +5508,11 @@ impl AnchorKitContract {
     /// `SERVICE_QUOTES`. Used by routing (#238) to exclude anchors that do not
     /// advertise the quote service before scoring.
     fn advertises_quote_service(env: &Env, anchor: &Address) -> bool {
+        let xdr = anchor.clone().to_xdr(env);
+        let raw = xdr_to_vec(&xdr);
         env.storage()
             .persistent()
-            .get::<_, AnchorServices>(&(symbol_short!("SERVICES"), anchor.clone()))
+            .get::<_, AnchorServices>(&make_storage_key(env, &[b"SERVICES", &raw]))
             .map(|s| s.services.contains(&SERVICE_QUOTES))
             .unwrap_or(false)
     }

@@ -4,9 +4,10 @@
 # Validates with ajv-cli if available, otherwise falls back to validate_config_strict.py.
 $ErrorActionPreference = "Stop"
 
-$Schema     = "config_schema.json"
-$ConfigsDir = "configs"
-$ValidatorPy = "validate_config_strict.py"
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$Schema     = Join-Path $ProjectRoot "config_schema.json"
+$ConfigsDir = Join-Path $ProjectRoot "configs"
+$ValidatorPy = Join-Path $PSScriptRoot "validate_config_strict.py"
 $Failed     = $false
 
 function Die([string]$msg) { Write-Error "❌ $msg"; exit 1 }

@@ -10,7 +10,7 @@ mod capability_detection_tests {
     use rand::rngs::OsRng;
 
     use anchorkit::contract::{
-        AnchorKitContract, AnchorKitContractClient, ServiceType,
+        AnchorKitContract, AnchorKitContractClient, ServiceRetirementInfo, ServiceType,
         SERVICE_DEPOSITS, SERVICE_WITHDRAWALS, SERVICE_QUOTES, SERVICE_KYC,
         SERVICE_CAPABILITY_VERSION,
     };
@@ -239,9 +239,11 @@ mod capability_detection_tests {
         let anchor = Address::generate(&env);
         { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
+        let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
         client.configure_services_versioned(
             &anchor,
             &services(&env, &[SERVICE_KYC]),
+            &empty_retirements,
             &SERVICE_CAPABILITY_VERSION,
         );
         assert!(client.supports_service(&anchor, &SERVICE_KYC));
@@ -259,9 +261,11 @@ mod capability_detection_tests {
         { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
         let too_new = SERVICE_CAPABILITY_VERSION + 1;
+        let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
         let result = client.try_configure_services_versioned(
             &anchor,
             &services(&env, &[SERVICE_DEPOSITS]),
+            &empty_retirements,
             &too_new,
         );
         assert!(result.is_err());
@@ -274,9 +278,11 @@ mod capability_detection_tests {
         let anchor = Address::generate(&env);
         { let sk = SigningKey::generate(&mut OsRng); register_attestor_with_sep10(&env, &client, &anchor, &anchor, &sk); }
 
+        let empty_retirements: Vec<ServiceRetirementInfo> = Vec::new(&env);
         let result = client.try_configure_services_versioned(
             &anchor,
             &services(&env, &[SERVICE_DEPOSITS]),
+            &empty_retirements,
             &0u32,
         );
         assert!(result.is_err());
