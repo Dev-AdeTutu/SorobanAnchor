@@ -1450,15 +1450,17 @@ impl AnchorKitContract {
         );
     }
 
-    /// Run post-upgrade migration logic (idempotent).
+    /// Run post-upgrade migration and advance the on-chain schema version.
     ///
-    /// Called after a contract upgrade to perform any necessary data migrations or
-    /// initialization of new storage fields. This function is idempotent — calling it
-    /// multiple times has the same effect as calling it once.
+    /// Must be called after each WASM upgrade to explicitly record the new schema
+    /// version. The version counter is monotonically increasing — each call must
+    /// supply a version strictly greater than the currently stored one.
     ///
     /// # Arguments
     ///
     /// * `env` - The Soroban environment context.
+    /// * `new_schema_version` - The schema version to advance to. Must be > 0 and
+    ///   greater than the currently stored version (returned by `get_schema_version`).
     ///
     /// # Authorization
     ///
@@ -1467,6 +1469,8 @@ impl AnchorKitContract {
     /// # Errors
     ///
     /// Panics with [`ErrorCode::NotInitialized`] if the contract has not been initialized.
+    /// Panics with [`ErrorCode::ValidationError`] if `new_schema_version == 0` or
+    /// `new_schema_version <= current_stored_version`.
     ///
     /// # Examples
     ///
@@ -1475,7 +1479,7 @@ impl AnchorKitContract {
     /// use anchorkit::AnchorKitContract;
     ///
     /// let env = Env::default();
-    /// AnchorKitContract::migrate(env);
+    /// AnchorKitContract::migrate(env, 1u32);
     /// ```
     pub fn migrate(env: Env, new_schema_version: u32) {
         // migrate must not run before initialization
