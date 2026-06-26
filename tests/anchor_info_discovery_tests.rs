@@ -605,6 +605,85 @@ mod anchor_info_discovery_tests {
         );
     }
 
+    /// deposit_fee_percent = 0 bps (free) must be accepted.
+    #[test]
+    fn test_fee_percent_zero_accepted() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        let asset = AssetInfo {
+            code: String::from_str(&env, "USDC"),
+            issuer: String::from_str(&env, "GABC"),
+            deposit_enabled: true,
+            withdrawal_enabled: false,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 0, // 0 bps — free
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 100,
+            deposit_max_amount: 1_000,
+            withdrawal_min_amount: 0,
+            withdrawal_max_amount: 0,
+        };
+        // Must not panic
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, asset), &3600u64);
+        let info = client.get_anchor_asset_info(&anchor, &String::from_str(&env, "USDC"));
+        assert_eq!(info.deposit_fee_percent, 0);
+    }
+
+    /// deposit_fee_percent = 10_000 bps (100%) must be accepted as the maximum valid value.
+    #[test]
+    fn test_fee_percent_max_ten_thousand_accepted() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        let asset = AssetInfo {
+            code: String::from_str(&env, "USDC"),
+            issuer: String::from_str(&env, "GABC"),
+            deposit_enabled: true,
+            withdrawal_enabled: false,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 10_000, // 10 000 bps = 100 % — maximum allowed
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 100,
+            deposit_max_amount: 1_000,
+            withdrawal_min_amount: 0,
+            withdrawal_max_amount: 0,
+        };
+        // Must not panic — 10 000 is the inclusive upper bound
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, asset), &3600u64);
+        let info = client.get_anchor_asset_info(&anchor, &String::from_str(&env, "USDC"));
+        assert_eq!(info.deposit_fee_percent, 10_000);
+    }
+
+    /// deposit_fee_percent = 10_001 bps (> 100%) must be rejected.
+    #[test]
+    #[should_panic]
+    fn test_fee_percent_ten_thousand_one_rejected() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let (client, anchor) = setup(&env);
+
+        let bad_asset = AssetInfo {
+            code: String::from_str(&env, "USDC"),
+            issuer: String::from_str(&env, "GABC"),
+            deposit_enabled: true,
+            withdrawal_enabled: false,
+            deposit_fee_fixed: 0,
+            deposit_fee_percent: 10_001, // one bps over the 100 % ceiling
+            withdrawal_fee_fixed: 0,
+            withdrawal_fee_percent: 0,
+            deposit_min_amount: 100,
+            deposit_max_amount: 1_000,
+            withdrawal_min_amount: 0,
+            withdrawal_max_amount: 0,
+        };
+        client.fetch_anchor_info(&anchor, &make_toml_with_asset(&env, bad_asset), &3600u64);
+    }
+
     /// deposit_min_amount > deposit_max_amount (inverted range) must be rejected.
     #[test]
     #[should_panic]
