@@ -58,7 +58,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::anchor_health::{HealthWindow, EndpointOutcome};
+use crate::anchor_health::{HealthWindow, EndpointOutcome, classify_http_status};
 use crate::errors::AnchorKitError;
 
 // ---------------------------------------------------------------------------
@@ -199,6 +199,26 @@ impl ProbeResult {
             probe_id,
             outcome: ProbeOutcome::Failure(reason.into()),
             latency_ms,
+        }
+    }
+
+    /// Build a result from an observed HTTP status code and the round-trip
+    /// latency measured around the request.
+    ///
+    /// Status classification defers to the shared
+    /// [`classify_http_status`](crate::anchor_health::classify_http_status)
+    /// success-range policy, so any `2xx` — including a bodyless
+    /// `204 No Content` liveness response — is treated as healthy, and
+    /// non-success statuses keep their existing `HTTP <code>` failure reason.
+    ///
+    /// On the success path the measured `latency_ms` is recorded so operators
+    /// can tell a fast healthy endpoint from a barely responsive one; the same
+    /// value is carried on the failure path for context. Units match the
+    /// neighbouring `latency_ms` field (milliseconds).
+    pub fn from_http_status(probe_id: u64, status: u16, latency_ms: u64) -> Self {
+        match classify_http_status(status) {
+            EndpointOutcome::Success => ProbeResult::success(probe_id, latency_ms),
+            EndpointOutcome::Failure(reason) => ProbeResult::failure(probe_id, latency_ms, reason),
         }
     }
 
@@ -496,6 +516,36 @@ mod tests {
     fn probe_result_is_not_ok_for_failure() {
         let r = ProbeResult::failure(1, 0, "timeout");
         assert!(!r.is_ok());
+    }
+
+    // ── ProbeResult::from_http_status (#822 latency, #823 204-as-success) ─────
+
+    #[test]
+    fn from_http_status_200_records_measured_latency() {
+        // #822: a successful probe exposes the elapsed latency, not a placeholder.
+        let r = ProbeResult::from_http_status(7, 200, 37);
+        assert!(r.is_ok());
+        assert_eq!(r.outcome, ProbeOutcome::Success);
+        assert_eq!(r.latency_ms, 37);
+    }
+
+    #[test]
+    fn from_http_status_204_is_success_without_a_body() {
+        // #823: a compliant liveness endpoint may answer 204 with no body.
+        let r = ProbeResult::from_http_status(7, 204, 12);
+        assert!(r.is_ok());
+        assert_eq!(r.outcome, ProbeOutcome::Success);
+        assert_eq!(r.latency_ms, 12);
+    }
+
+    #[test]
+    fn from_http_status_non_2xx_keeps_existing_failure_classification() {
+        let r = ProbeResult::from_http_status(7, 503, 90);
+        assert!(!r.is_ok());
+        match r.outcome {
+            ProbeOutcome::Failure(reason) => assert!(reason.contains("503"), "got: {reason}"),
+            other => panic!("expected failure, got {other:?}"),
+        }
     }
 
     // ── probe_results_to_health_window ───────────────────────────────────────

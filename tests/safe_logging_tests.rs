@@ -269,4 +269,60 @@ mod safe_logging_tests {
             "ProxyConfig debug should keep the proxy URL visible, got: {debug_output}"
         );
     }
+
+    // ── #825: Authorization header redaction in OutboundRequestOptions debug ───
+
+    /// `OutboundRequestOptions` debug output must never contain the bearer
+    /// token that becomes the outbound `Authorization` header, while leaving
+    /// non-secret fields (the idempotency key) visible for diagnostics.
+    #[test]
+    fn test_outbound_request_options_debug_redacts_authorization_token() {
+        use anchorkit::http_client::OutboundRequestOptions;
+
+        let opts = OutboundRequestOptions::with_idempotency_key("txn-825")
+            .with_signing_key(b"hmac-signing-secret")
+            .with_bearer_token("sep10-jwt-bearer-secret");
+
+        let debug_output = format!("{opts:?}");
+
+        assert!(
+            !debug_output.contains("sep10-jwt-bearer-secret"),
+            "debug output must not expose the Authorization bearer token, got: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("hmac-signing-secret"),
+            "debug output must not expose the HMAC signing key, got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("<redacted>"),
+            "debug output must contain the redaction marker, got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("txn-825"),
+            "the idempotency key is not sensitive and must remain visible, got: {debug_output}"
+        );
+    }
+
+    /// A custom `Authorization` header supplied verbatim must also be redacted
+    /// in debug output, while the header name stays visible.
+    #[test]
+    fn test_outbound_request_options_debug_redacts_custom_authorization_header() {
+        use anchorkit::http_client::{OutboundRequestOptions, RequestCredentials};
+
+        let opts = OutboundRequestOptions::default().with_credentials(RequestCredentials::Header {
+            name: "Authorization".to_string(),
+            value: "Bearer verbatim-header-secret".to_string(),
+        });
+
+        let debug_output = format!("{opts:?}");
+
+        assert!(
+            !debug_output.contains("verbatim-header-secret"),
+            "debug output must not expose a verbatim Authorization value, got: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("Authorization"),
+            "the header name is not sensitive and must remain visible, got: {debug_output}"
+        );
+    }
 }

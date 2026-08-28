@@ -125,6 +125,13 @@ pub struct OutboundRequestOptions {
     pub credentials: Option<RequestCredentials>,
 }
 
+/// `Debug` keeps secret-bearing fields out of formatted output: the HMAC
+/// `signing_key` is shown only as a presence marker, and `credentials` is
+/// rendered through [`RequestCredentials`]'s own redacting `Debug`, so an
+/// `Authorization` (bearer/basic) or custom auth header value never appears —
+/// even when options are logged on an outbound failure. Non-secret fields
+/// (idempotency key, trace, Basic username, custom header name) stay visible
+/// for diagnostics. The header actually sent on the wire is unaffected.
 impl core::fmt::Debug for OutboundRequestOptions {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("OutboundRequestOptions")
@@ -150,6 +157,15 @@ impl OutboundRequestOptions {
     /// Attach an HMAC-SHA256 signing key to this options set.
     pub fn with_signing_key(mut self, key: &[u8]) -> Self {
         self.signing_key = Some(key.to_vec());
+        self
+    }
+
+    /// Attach an explicit [`RequestCredentials`] value to this options set.
+    ///
+    /// The `with_bearer_token` / `with_basic_auth` / `with_header_credential`
+    /// helpers are shorthands for the common variants.
+    pub fn with_credentials(mut self, credentials: RequestCredentials) -> Self {
+        self.credentials = Some(credentials);
         self
     }
 
@@ -520,8 +536,27 @@ pub fn post_with_options<H>(
 where
     H: FnMut(&str, &str, &[(String, String)]) -> Result<u16, String>,
 {
+    // Enforce the HTTPS transport requirement at the client boundary so a
+    // direct caller cannot bypass it by handing us a cleartext endpoint.
+    // This is a scheme-only guard: host shape, path, and IP-literal checks
+    // remain the job of the shared domain validator and are not duplicated
+    // here.
+    if !is_https_endpoint(url) {
+        return Err("outbound request rejected: endpoint URL must use the https:// scheme".into());
+    }
     let headers = opts.map(|o| o.build_headers(body)).unwrap_or_default();
     http_post(url, body, &headers)
+}
+
+/// Returns `true` when `url` uses the `https://` scheme (case-insensitive).
+///
+/// Used to keep cleartext HTTP endpoints out of [`post_with_options`] and
+/// [`post_with_options_metered`]; mirrors the scheme handling in
+/// [`ProxyConfig::select_proxy_url`].
+fn is_https_endpoint(url: &str) -> bool {
+    url.get(.."https://".len())
+        .map(|s| s.eq_ignore_ascii_case("https://"))
+        .unwrap_or(false)
 }
 
 /// Like [`post_with_options`], additionally recording request metrics.
