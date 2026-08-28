@@ -132,11 +132,35 @@ impl ProbeConfig {
     }
 
     /// Set the latency threshold (builder-style).
-    pub fn with_latency_threshold(mut self, ms: u64) -> Self {
+    ///
+    /// Returns `Err(AnchorKitError::validation_error)` when `ms` is zero
+    /// (a zero threshold immediately classifies every probe as slow) or when
+    /// `ms` exceeds [`MAX_PROBE_TIMEOUT_MS`] (prevents silent overflow when
+    /// the value is later converted to a `std::time::Duration`).
+    pub fn with_latency_threshold(mut self, ms: u64) -> Result<Self, AnchorKitError> {
+        if ms == 0 {
+            return Err(AnchorKitError::validation_error(
+                "probe latency threshold must be greater than zero",
+            ));
+        }
+        if ms > MAX_PROBE_TIMEOUT_MS {
+            return Err(AnchorKitError::validation_error(
+                &alloc::format!(
+                    "probe latency threshold {ms} ms exceeds maximum {MAX_PROBE_TIMEOUT_MS} ms"
+                ),
+            ));
+        }
         self.latency_threshold_ms = ms;
-        self
+        Ok(self)
     }
 }
+
+/// Maximum allowed probe latency threshold in milliseconds (1 hour).
+///
+/// Values above this are rejected by [`ProbeConfig::with_latency_threshold`]
+/// to prevent silent overflow when the threshold is converted to a
+/// `std::time::Duration` or compared against a `u32` timer register.
+pub const MAX_PROBE_TIMEOUT_MS: u64 = 3_600_000;
 
 // ---------------------------------------------------------------------------
 // ProbeOutcome
@@ -434,7 +458,8 @@ mod tests {
         let probes = alloc::vec![
             ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com")
                 .unwrap()
-                .with_latency_threshold(100),
+                .with_latency_threshold(100)
+                .unwrap(),
         ];
         let runner = SyntheticProbeRunner::new(probes);
         let reports = runner.run_all(
@@ -449,7 +474,8 @@ mod tests {
         let probes = alloc::vec![
             ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com")
                 .unwrap()
-                .with_latency_threshold(1000),
+                .with_latency_threshold(1000)
+                .unwrap(),
         ];
         let runner = SyntheticProbeRunner::new(probes);
         let reports = runner.run_all(

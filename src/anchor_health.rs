@@ -283,6 +283,73 @@ impl HealthWindow {
         let failures = self.routing_failure_count.min(self.routing_attempt_count);
         1.0 - (failures as f64 / self.routing_attempt_count as f64)
     }
+
+    /// Construct a [`HealthWindow`] from externally-parsed or signed counts.
+    ///
+    /// Returns `Err` when any count is negative, because a negative success or
+    /// latency count makes the aggregate mathematically meaningless and can
+    /// incorrectly classify an anchor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnchorKitError::validation_error`] for any negative argument.
+    pub fn new_checked(
+        started_at: u64,
+        ended_at: u64,
+        success_count: i64,
+        failure_count: i64,
+        p50_latency_ms: f64,
+        routing_failure_count: i64,
+        routing_attempt_count: i64,
+        recovery_time_seconds: u64,
+    ) -> Result<Self, crate::errors::AnchorKitError> {
+        if success_count < 0 {
+            return Err(crate::errors::AnchorKitError::validation_error(
+                "success_count must be non-negative",
+            ));
+        }
+        if failure_count < 0 {
+            return Err(crate::errors::AnchorKitError::validation_error(
+                "failure_count must be non-negative",
+            ));
+        }
+        if routing_failure_count < 0 {
+            return Err(crate::errors::AnchorKitError::validation_error(
+                "routing_failure_count must be non-negative",
+            ));
+        }
+        if routing_attempt_count < 0 {
+            return Err(crate::errors::AnchorKitError::validation_error(
+                "routing_attempt_count must be non-negative",
+            ));
+        }
+        Ok(HealthWindow {
+            started_at,
+            ended_at,
+            success_count: success_count as u64,
+            failure_count: failure_count as u64,
+            p50_latency_ms,
+            routing_failure_count: routing_failure_count as u64,
+            routing_attempt_count: routing_attempt_count as u64,
+            recovery_time_seconds,
+        })
+    }
+
+    /// Decrement the failure counter by one, saturating at zero.
+    ///
+    /// Uses saturating subtraction so the count never wraps around from zero
+    /// to `u64::MAX`, which would distort health classification.
+    pub fn decrement_failure(&mut self) {
+        self.failure_count = self.failure_count.saturating_sub(1);
+    }
+
+    /// Decrement the success counter by one, saturating at zero.
+    ///
+    /// Uses saturating subtraction so the count never wraps around from zero
+    /// to `u64::MAX`, which would distort health classification.
+    pub fn decrement_success(&mut self) {
+        self.success_count = self.success_count.saturating_sub(1);
+    }
 }
 
 /// The composite health score for a single observation window.
@@ -458,6 +525,97 @@ pub fn compute_trend(windows: &[HealthWindow]) -> HealthTrend {
         HealthTrend::Degrading
     } else {
         HealthTrend::Stable
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Health state transition events (#recovery-observability)
+// ---------------------------------------------------------------------------
+
+/// A discrete health-state transition event emitted when an anchor's
+/// classification changes between observations.
+///
+/// The `Recovery` variant is the observability signal that was previously
+/// missing: without it, a monitoring pipeline could not distinguish "still
+/// healthy" from "just recovered" and would silently miss recoveries.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HealthTransitionEvent {
+    /// Anchor transitioned from a non-healthy state to healthy (≥ 80).
+    Recovery {
+        /// Composite score of the previous (non-healthy) window.
+        previous_composite: f64,
+        /// Composite score of the current (healthy) window.
+        current_composite: f64,
+    },
+    /// Anchor transitioned from healthy to a non-healthy state.
+    Failure {
+        /// Composite score of the previous (healthy) window.
+        previous_composite: f64,
+        /// Composite score of the current (non-healthy) window.
+        current_composite: f64,
+    },
+    /// No state-boundary crossing; classification is unchanged.
+    NoChange,
+}
+
+impl HealthTransitionEvent {
+    /// Returns `true` when this event represents a recovery.
+    pub fn is_recovery(&self) -> bool {
+        matches!(self, HealthTransitionEvent::Recovery { .. })
+    }
+
+    /// Returns `true` when this event represents a new failure.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, HealthTransitionEvent::Failure { .. })
+    }
+}
+
+/// Compare two consecutive composite scores and emit the appropriate
+/// [`HealthTransitionEvent`].
+///
+/// Callers should invoke this once per observation cycle, right after
+/// computing the new window score, and act on the returned event (e.g.
+/// increment a recovery counter, page an operator, clear an alert).
+///
+/// A healthy anchor has composite ≥ 80.  The function emits:
+/// - [`HealthTransitionEvent::Recovery`] on the first window where the anchor
+///   is healthy after having been non-healthy.
+/// - [`HealthTransitionEvent::Failure`] on the first window where the anchor
+///   is non-healthy after having been healthy.
+/// - [`HealthTransitionEvent::NoChange`] when the classification is unchanged,
+///   preventing duplicate recovery or failure signals for repeated observations.
+///
+/// # Examples
+///
+/// ```rust
+/// use anchorkit::anchor_health::{detect_health_transition, HealthTransitionEvent};
+///
+/// // Recovery: was 40, now 85
+/// let ev = detect_health_transition(40.0, 85.0);
+/// assert!(ev.is_recovery());
+///
+/// // Failure: was 90, now 30
+/// let ev = detect_health_transition(90.0, 30.0);
+/// assert!(ev.is_failure());
+///
+/// // No change: both healthy
+/// let ev = detect_health_transition(85.0, 92.0);
+/// assert_eq!(ev, HealthTransitionEvent::NoChange);
+/// ```
+pub fn detect_health_transition(previous: f64, current: f64) -> HealthTransitionEvent {
+    const HEALTHY_THRESHOLD: f64 = 80.0;
+    let was_healthy = previous >= HEALTHY_THRESHOLD;
+    let is_healthy  = current  >= HEALTHY_THRESHOLD;
+    match (was_healthy, is_healthy) {
+        (false, true)  => HealthTransitionEvent::Recovery {
+            previous_composite: previous,
+            current_composite:  current,
+        },
+        (true, false)  => HealthTransitionEvent::Failure {
+            previous_composite: previous,
+            current_composite:  current,
+        },
+        _ => HealthTransitionEvent::NoChange,
     }
 }
 

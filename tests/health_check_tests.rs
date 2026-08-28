@@ -313,3 +313,107 @@ fn test_freshness_score_influences_refresh_decision() {
     assert!(report_old.freshness_score < report_now.freshness_score,
         "aging should reduce score");
 }
+
+// ---------------------------------------------------------------------------
+// ProbeConfig::with_latency_threshold — timeout boundary validation (issue #1)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod probe_timeout_validation_tests {
+    use anchorkit::synthetic_probe::{ProbeConfig, ProbeKind, MAX_PROBE_TIMEOUT_MS};
+
+    #[test]
+    fn zero_threshold_is_rejected() {
+        let err = ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com")
+            .unwrap()
+            .with_latency_threshold(0)
+            .unwrap_err();
+        assert!(
+            err.message.contains("greater than zero"),
+            "expected zero-threshold error, got: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn threshold_above_max_is_rejected() {
+        let err = ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com")
+            .unwrap()
+            .with_latency_threshold(MAX_PROBE_TIMEOUT_MS + 1)
+            .unwrap_err();
+        assert!(
+            err.message.contains("exceeds maximum"),
+            "expected overflow error, got: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn threshold_at_max_boundary_is_accepted() {
+        let cfg = ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com")
+            .unwrap()
+            .with_latency_threshold(MAX_PROBE_TIMEOUT_MS)
+            .unwrap();
+        assert_eq!(cfg.latency_threshold_ms, MAX_PROBE_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn small_valid_threshold_retains_exact_value() {
+        let cfg = ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com")
+            .unwrap()
+            .with_latency_threshold(500)
+            .unwrap();
+        assert_eq!(cfg.latency_threshold_ms, 500);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HealthWindow counter decrement — saturating at zero (issue #4)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod counter_underflow_tests {
+    use anchorkit::anchor_health::HealthWindow;
+
+    fn make_window(success: u64, failure: u64) -> HealthWindow {
+        HealthWindow {
+            started_at: 0,
+            ended_at: 300,
+            success_count: success,
+            failure_count: failure,
+            p50_latency_ms: 0.0,
+            routing_failure_count: 0,
+            routing_attempt_count: 0,
+            recovery_time_seconds: 0,
+        }
+    }
+
+    #[test]
+    fn decrement_failure_saturates_at_zero() {
+        let mut w = make_window(5, 0);
+        w.decrement_failure();
+        // Must not wrap to u64::MAX
+        assert_eq!(w.failure_count, 0, "zero failure count must not underflow");
+    }
+
+    #[test]
+    fn decrement_success_saturates_at_zero() {
+        let mut w = make_window(0, 5);
+        w.decrement_success();
+        assert_eq!(w.success_count, 0, "zero success count must not underflow");
+    }
+
+    #[test]
+    fn decrement_failure_positive_count_decrements_once() {
+        let mut w = make_window(5, 3);
+        w.decrement_failure();
+        assert_eq!(w.failure_count, 2);
+    }
+
+    #[test]
+    fn decrement_success_positive_count_decrements_once() {
+        let mut w = make_window(5, 3);
+        w.decrement_success();
+        assert_eq!(w.success_count, 4);
+    }
+}

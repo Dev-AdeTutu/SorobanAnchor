@@ -291,3 +291,122 @@ mod anchor_health_metrics_tests {
         assert_eq!(mb.uptime_bps, 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// HealthWindow::new_checked — negative input rejection (issue #2)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod negative_count_rejection_tests {
+    use anchorkit::anchor_health::HealthWindow;
+
+    #[test]
+    fn negative_success_count_is_rejected() {
+        let err = HealthWindow::new_checked(0, 300, -1, 0, 0.0, 0, 0, 0).unwrap_err();
+        assert!(
+            err.message.contains("success_count"),
+            "expected rejection of negative success_count, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn negative_failure_count_is_rejected() {
+        let err = HealthWindow::new_checked(0, 300, 0, -5, 0.0, 0, 0, 0).unwrap_err();
+        assert!(
+            err.message.contains("failure_count"),
+            "expected rejection of negative failure_count, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn negative_routing_failure_count_is_rejected() {
+        let err = HealthWindow::new_checked(0, 300, 10, 0, 100.0, -2, 10, 0).unwrap_err();
+        assert!(
+            err.message.contains("routing_failure_count"),
+            "expected rejection of negative routing_failure_count, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn negative_routing_attempt_count_is_rejected() {
+        let err = HealthWindow::new_checked(0, 300, 10, 0, 100.0, 0, -1, 0).unwrap_err();
+        assert!(
+            err.message.contains("routing_attempt_count"),
+            "expected rejection of negative routing_attempt_count, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn zero_counts_are_accepted() {
+        let w = HealthWindow::new_checked(0, 300, 0, 0, 0.0, 0, 0, 0).unwrap();
+        assert_eq!(w.success_count, 0);
+        assert_eq!(w.failure_count, 0);
+    }
+
+    #[test]
+    fn positive_counts_are_accepted_and_exact() {
+        let w = HealthWindow::new_checked(100, 400, 95, 5, 200.0, 1, 10, 0).unwrap();
+        assert_eq!(w.success_count, 95);
+        assert_eq!(w.failure_count, 5);
+        assert_eq!(w.routing_failure_count, 1);
+        assert_eq!(w.routing_attempt_count, 10);
+        // Aggregation should still classify this window as healthy
+        use anchorkit::anchor_health::score_window;
+        let score = score_window(&w);
+        assert!(score.composite > 80.0, "healthy window should score >80, got {}", score.composite);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// detect_health_transition — recovery transition observability (issue #3)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod recovery_transition_tests {
+    use anchorkit::anchor_health::{detect_health_transition, HealthTransitionEvent};
+
+    #[test]
+    fn recovery_emits_exactly_one_signal() {
+        // First cycle: unhealthy → healthy
+        let ev = detect_health_transition(40.0, 85.0);
+        match &ev {
+            HealthTransitionEvent::Recovery { previous_composite, current_composite } => {
+                assert!((previous_composite - 40.0).abs() < 1e-9);
+                assert!((current_composite - 85.0).abs() < 1e-9);
+            }
+            _ => panic!("expected Recovery event, got {:?}", ev),
+        }
+    }
+
+    #[test]
+    fn repeated_healthy_observations_do_not_emit_duplicate_recovery() {
+        // Both previous and current are healthy → NoChange, not a duplicate Recovery
+        let ev = detect_health_transition(85.0, 92.0);
+        assert_eq!(ev, HealthTransitionEvent::NoChange,
+            "staying healthy must not produce a recovery event");
+    }
+
+    #[test]
+    fn failure_transition_is_unchanged() {
+        let ev = detect_health_transition(90.0, 30.0);
+        assert!(ev.is_failure(), "healthy→non-healthy must emit Failure, got {:?}", ev);
+    }
+
+    #[test]
+    fn no_change_when_both_unhealthy() {
+        let ev = detect_health_transition(30.0, 45.0);
+        assert_eq!(ev, HealthTransitionEvent::NoChange,
+            "both non-healthy must emit NoChange");
+    }
+
+    #[test]
+    fn boundary_at_exactly_80_is_healthy() {
+        // Crossing the boundary from 79.9 → 80.0 is a recovery
+        let ev = detect_health_transition(79.9, 80.0);
+        assert!(ev.is_recovery(), "crossing to 80.0 must be a recovery, got {:?}", ev);
+    }
+}
