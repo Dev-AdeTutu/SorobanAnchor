@@ -20,6 +20,7 @@ fn raw_payment() -> RawSep31PaymentResponse {
     RawSep31PaymentResponse {
         id: "pay-001".into(),
         stellar_account_id: VALID_ACCOUNT.into(),
+        sender: "sender-001".into(),
         stellar_memo: None,
         stellar_memo_type: None,
         amount: None,
@@ -39,6 +40,16 @@ fn valid_payment_response_accepted() {
 fn empty_id_rejected() {
     let mut raw = raw_payment();
     raw.id.clear();
+    assert_eq!(
+        initiate_sep31_payment(raw),
+        Err(Error::invalid_transaction_intent())
+    );
+}
+
+#[test]
+fn empty_sender_rejected() {
+    let mut raw = raw_payment();
+    raw.sender.clear();
     assert_eq!(
         initiate_sep31_payment(raw),
         Err(Error::invalid_transaction_intent())
