@@ -6,7 +6,12 @@
 //! Stellar TOML discovery, including handling of redirects, missing files,
 //! and invalid content.
 
-use anchorkit::stellar_toml::{fetch_stellar_toml_url, parse_stellar_toml, ParsedStellarToml};
+use anchorkit::retry::{MockJitterSource, RetryConfig};
+use anchorkit::stellar_toml::{
+    fetch_stellar_toml_url, fetch_stellar_toml_with_retry, parse_stellar_toml,
+    parse_stellar_toml_with_origin, ParsedStellarToml, StellarTomlFetchConfig,
+    MAX_STELLAR_TOML_BYTES,
+};
 
 // ── Mock TOML responses ────────────────────────────────────────────────────
 
@@ -117,6 +122,16 @@ SIGNING_KEY = "GSIGN123"
 
 const INVALID_TOML_MISSING_SCHEME: &str = r#"
 TRANSFER_SERVER = "api.example.com"
+SIGNING_KEY = "GSIGN123"
+"#;
+
+const VALID_TOML_SAME_ORIGIN: &str = r#"
+TRANSFER_SERVER = "https://anchor.example.com"
+SIGNING_KEY = "GSIGN123"
+"#;
+
+const TOML_MISMATCHED_ORIGIN: &str = r#"
+TRANSFER_SERVER = "https://evil.example.net"
 SIGNING_KEY = "GSIGN123"
 "#;
 
@@ -256,6 +271,74 @@ fn test_parse_invalid_toml_malformed_url_rejected() {
 fn test_parse_invalid_toml_missing_scheme_rejected() {
     let result = parse_stellar_toml(INVALID_TOML_MISSING_SCHEME);
     assert!(result.is_err(), "URL without scheme must be rejected");
+}
+
+// ── Origin-pinning tests (#847) ────────────────────────────────────────────
+
+#[test]
+fn test_parse_stellar_toml_with_origin_same_origin_passes() {
+    let parsed = parse_stellar_toml_with_origin(VALID_TOML_SAME_ORIGIN, "https://anchor.example.com")
+        .expect("same-origin TRANSFER_SERVER must pass");
+    assert_eq!(parsed.transfer_server.as_deref(), Some("https://anchor.example.com"));
+}
+
+#[test]
+fn test_parse_stellar_toml_with_origin_mismatched_origin_rejected() {
+    let result = parse_stellar_toml_with_origin(TOML_MISMATCHED_ORIGIN, "https://anchor.example.com");
+    assert!(result.is_err(), "mismatched TRANSFER_SERVER origin must be rejected before use");
+}
+
+#[test]
+fn test_parse_stellar_toml_with_origin_ignores_unrelated_metadata() {
+    // Other fields (currencies, signing key, unrelated SEP endpoints) are
+    // untouched by origin pinning — only TRANSFER_SERVER is checked.
+    let parsed = parse_stellar_toml_with_origin(VALID_TOML_FULL, "https://api.example.com")
+        .expect("matching TRANSFER_SERVER origin must pass");
+    assert_eq!(parsed.kyc_server.as_deref(), Some("https://kyc.example.com"));
+    assert_eq!(parsed.web_auth_endpoint.as_deref(), Some("https://auth.example.com"));
+    assert_eq!(parsed.supported_assets.len(), 3);
+}
+
+// ── Document size bound tests (#850) ───────────────────────────────────────
+
+#[test]
+fn test_fetch_stellar_toml_with_retry_rejects_oversized_body() {
+    let config = StellarTomlFetchConfig {
+        retry: RetryConfig::new(1, 0, 0, 1),
+        fallback_hosts: Vec::new(),
+    };
+    let oversized_body = "a".repeat(MAX_STELLAR_TOML_BYTES + 1);
+    let mut js = MockJitterSource::new(vec![0u64; 4]);
+
+    let result = fetch_stellar_toml_with_retry(
+        "https://anchor.example.com",
+        &config,
+        |_url| Ok(oversized_body.clone()),
+        |_ms| {},
+        &mut js,
+    );
+
+    assert!(result.is_err(), "oversized stellar.toml body must be rejected before parsing");
+}
+
+#[test]
+fn test_fetch_stellar_toml_with_retry_accepts_body_at_limit() {
+    let config = StellarTomlFetchConfig {
+        retry: RetryConfig::new(1, 0, 0, 1),
+        fallback_hosts: Vec::new(),
+    };
+    let at_limit_body = "a".repeat(MAX_STELLAR_TOML_BYTES);
+    let mut js = MockJitterSource::new(vec![0u64; 4]);
+
+    let result = fetch_stellar_toml_with_retry(
+        "https://anchor.example.com",
+        &config,
+        |_url| Ok(at_limit_body.clone()),
+        |_ms| {},
+        &mut js,
+    );
+
+    assert!(result.is_ok(), "a body at exactly the limit must still be accepted");
 }
 
 // ── Edge case tests ────────────────────────────────────────────────────────
