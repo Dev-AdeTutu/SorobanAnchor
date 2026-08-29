@@ -31,7 +31,7 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 
 use crate::domain_validator::validate_anchor_domain;
-use crate::errors::AnchorKitError;
+use crate::errors::{AnchorKitError, ErrorCode};
 use crate::retry::{retry_with_backoff, JitterSource, RetryConfig};
 
 /// A single currency/asset declared in a `[[CURRENCIES]]` table.
@@ -272,6 +272,52 @@ fn flush_currency(
     Ok(())
 }
 
+/// Parse a stellar.toml document and confirm its primary discovered endpoint
+/// (`TRANSFER_SERVER`) shares the same origin as `source_domain` — the domain
+/// the document was actually fetched from.
+///
+/// A stellar.toml file is reachable at one origin but is otherwise free-form
+/// text; without this check a malicious or misconfigured document could
+/// declare a `TRANSFER_SERVER` on an unrelated host and silently redirect
+/// callers there. Only the primary endpoint is pinned — every other field
+/// parses exactly as [`parse_stellar_toml`] would.
+///
+/// # Errors
+/// Returns `Err` if the document fails to parse, or if `TRANSFER_SERVER` is
+/// present and its origin does not match `source_domain`'s origin.
+pub fn parse_stellar_toml_with_origin(
+    raw: &str,
+    source_domain: &str,
+) -> Result<ParsedStellarToml, AnchorKitError> {
+    let parsed = parse_stellar_toml(raw)?;
+    if let Some(endpoint) = parsed.transfer_server.as_deref() {
+        if endpoint_origin(endpoint) != endpoint_origin(source_domain) {
+            return Err(AnchorKitError::with_context(
+                ErrorCode::InvalidEndpointFormat,
+                "discovered TRANSFER_SERVER origin does not match source domain",
+                endpoint,
+            ));
+        }
+    }
+    Ok(parsed)
+}
+
+/// Extract a lowercased `scheme://host[:port]` origin from a URL for
+/// same-origin comparison.
+fn endpoint_origin(url: &str) -> String {
+    let scheme_end = match url.find("://") {
+        Some(pos) => pos,
+        None => return url.to_ascii_lowercase(),
+    };
+    let after_scheme = &url[scheme_end + 3..];
+    let authority_end = after_scheme
+        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .unwrap_or(after_scheme.len());
+    let scheme = &url[..scheme_end];
+    let authority = &after_scheme[..authority_end];
+    alloc::format!("{}://{}", scheme.to_ascii_lowercase(), authority.to_ascii_lowercase())
+}
+
 /// Extract (key, value) from a line of the form `KEY = "value"` or `KEY = value`.
 /// Returns `None` if the line is not a key=value assignment.
 fn parse_kv(line: &str) -> Option<(&str, String)> {
@@ -295,6 +341,13 @@ fn parse_kv(line: &str) -> Option<(&str, String)> {
 // ---------------------------------------------------------------------------
 // Resilient stellar.toml discovery (issue #289)
 // ---------------------------------------------------------------------------
+
+/// Maximum accepted size, in bytes, of a fetched stellar.toml response body.
+///
+/// A stellar.toml is a small, hand-authored capability document; a body
+/// beyond this bound is rejected before parsing so an oversized (or
+/// maliciously inflated) response cannot consume unbounded memory.
+pub const MAX_STELLAR_TOML_BYTES: usize = 100 * 1024;
 
 /// Configuration for resilient stellar.toml discovery.
 ///
@@ -453,6 +506,14 @@ where
 
         match result {
             Ok(raw_content) => {
+                if raw_content.len() > MAX_STELLAR_TOML_BYTES {
+                    last_err = Some(AnchorKitError::with_context(
+                        ErrorCode::InvalidEndpointFormat,
+                        "stellar.toml document exceeds maximum allowed size",
+                        &url,
+                    ));
+                    continue;
+                }
                 return Ok(StellarTomlFetchResult {
                     resolved_url: url,
                     raw_content,

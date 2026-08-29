@@ -51,6 +51,7 @@ pub fn classify_status_str(s: &str) -> StatusCategory {
         | "pending_user_transfer_complete"
         | "pending_stellar"
         | "waiting_customer_action"
+        | "pending_customer_info_update"
         | "incomplete"
         | "pending" => StatusCategory::Active,
         "completed" => StatusCategory::Completed,
@@ -269,7 +270,7 @@ impl TransactionStatus {
             "too_small" => Self::TooSmall,
             "too_large" => Self::TooLarge,
             "pending_stellar" => Self::PendingStellar,
-            "waiting_customer_action" => Self::WaitingCustomerAction,
+            "waiting_customer_action" | "pending_customer_info_update" => Self::WaitingCustomerAction,
             _ => Self::Error,
         }
     }
@@ -1261,6 +1262,20 @@ mod tests {
             TransactionStatus::WaitingCustomerAction
         );
         assert_eq!(TransactionStatus::WaitingCustomerAction.as_str(), "waiting_customer_action");
+    }
+
+    // ── #846 pending_customer_info_update must not fall through to Error ─────
+
+    #[test]
+    fn test_status_pending_customer_info_update_maps_to_waiting_customer_action() {
+        assert_eq!(
+            TransactionStatus::from_str("pending_customer_info_update"),
+            TransactionStatus::WaitingCustomerAction
+        );
+        assert_eq!(
+            classify_status_str("pending_customer_info_update"),
+            StatusCategory::Active
+        );
     }
 
     #[test]

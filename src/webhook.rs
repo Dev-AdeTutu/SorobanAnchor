@@ -73,19 +73,14 @@ pub fn verify_webhook_signature(payload: &str, signature_header: &str, key: &[u8
             _ => return false,
         }
     }
-    // Compute expected digest.
+    // Verify against the expected digest using HMAC's own constant-time
+    // comparison path, rather than a hand-rolled equality check.
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(payload.as_bytes());
-    // Constant-time comparison via XOR.
-    let expected = mac.finalize().into_bytes();
-    if received.len() != expected.len() {
-        return false;
-    }
-    let diff: u8 = received.iter().zip(expected.iter()).fold(0u8, |acc, (a, b)| acc | (a ^ b));
-    diff == 0
+    mac.verify_slice(&received).is_ok()
 }
 
 /// Result of webhook signature verification with replay protection.
