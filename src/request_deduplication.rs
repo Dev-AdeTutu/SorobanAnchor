@@ -363,6 +363,18 @@ mod tests {
         assert!(!store.is_duplicate(&key, 9999));
     }
 
+        #[test]
+    fn mixed_case_request_ids_remain_distinct() {
+        let mut store = DeduplicationStore::new(300);
+        let lower = DeduplicationKey::new("deposit", "txn-ABC");
+        let upper = DeduplicationKey::new("deposit", "txn-abc");
+
+        store.record_success(&lower, "first", 0);
+
+        assert!(store.is_duplicate(&lower, 1));
+        assert!(!store.is_duplicate(&upper, 1));
+    }
+
     #[test]
     fn cached_result_returns_success() {
         let mut store = DeduplicationStore::new(300);
