@@ -14,6 +14,9 @@ use crate::response_validator::validate_stellar_account_id;
 pub struct RawSep31PaymentResponse {
     pub id: String,
     pub stellar_account_id: String,
+    /// Identifier of the sending party, required for compliance and
+    /// reconciliation attribution.
+    pub sender: String,
     pub stellar_memo: Option<String>,
     pub stellar_memo_type: Option<String>,
     /// Amount of the sending asset (e.g. `"100.50"`). Validated as a positive decimal.
@@ -29,6 +32,9 @@ pub struct RawSep31PaymentResponse {
 pub struct Sep31PaymentResponse {
     pub id: String,
     pub stellar_account_id: String,
+    /// Identifier of the sending party, required for compliance and
+    /// reconciliation attribution.
+    pub sender: String,
     pub stellar_memo: Option<String>,
     pub stellar_memo_type: Option<String>,
     /// Amount of the sending asset (e.g. `"100.50"`). Validated as a positive decimal.
@@ -151,11 +157,13 @@ fn validate_idempotency_key(key: Option<&str>) -> Result<(), Error> {
 ///
 /// Validates and normalizes the following fields:
 /// - `id`: Must be non-empty and at most 64 characters.
+/// - `sender`: Must be non-empty (not just whitespace).
 /// - `stellar_account_id`: Must be a valid Stellar account ID.
 /// - `stellar_memo` / `stellar_memo_type`: Must be consistent when present;
 ///   memo value must not exceed 256 bytes.
 /// - `amount`: When present, must be a valid positive decimal.
-/// - `asset_code`: When present, is normalized to uppercase.
+/// - `asset_code`: When present, is normalized to uppercase, except the
+///   reserved `"native"` keyword which is preserved in lowercase.
 /// - `idempotency_key`: When present, must be non-empty, non-printable
 ///   characters rejected, and at most 64 characters.
 pub fn initiate_sep31_payment(
@@ -168,6 +176,9 @@ pub fn initiate_sep31_payment(
         return Err(Error::validation_error(
             &alloc::format!("id exceeds maximum length of {} characters", MAX_ID_LENGTH),
         ));
+    }
+    if raw.sender.trim().is_empty() {
+        return Err(Error::invalid_transaction_intent());
     }
     validate_stellar_account_id(&raw.stellar_account_id)?;
     validate_memo_pair(
@@ -186,7 +197,13 @@ pub fn initiate_sep31_payment(
 
     let asset_code = raw.asset_code
         .as_deref()
-        .map(normalize_asset_code)
+        .map(|code| {
+            if code.trim().eq_ignore_ascii_case("native") {
+                Ok(String::from("native"))
+            } else {
+                normalize_asset_code(code)
+            }
+        })
         .transpose()?;
 
     validate_idempotency_key(raw.idempotency_key.as_deref())?;
@@ -194,6 +211,7 @@ pub fn initiate_sep31_payment(
     Ok(Sep31PaymentResponse {
         id: raw.id,
         stellar_account_id: raw.stellar_account_id,
+        sender: raw.sender,
         stellar_memo: raw.stellar_memo,
         stellar_memo_type: raw.stellar_memo_type,
         amount,
@@ -214,6 +232,7 @@ mod tests {
         RawSep31PaymentResponse {
             id: "pay-001".to_string(),
             stellar_account_id: VALID_ACCOUNT.to_string(),
+            sender: "sender-001".to_string(),
             stellar_memo: None,
             stellar_memo_type: None,
             amount: None,
@@ -244,6 +263,34 @@ mod tests {
         let mut raw = raw_payment();
         raw.id = "a".repeat(65);
         assert!(initiate_sep31_payment(raw).is_err());
+    }
+
+    #[test]
+    fn test_initiate_sep31_payment_rejects_empty_sender() {
+        let mut raw = raw_payment();
+        raw.sender = String::new();
+        assert_eq!(
+            initiate_sep31_payment(raw),
+            Err(Error::invalid_transaction_intent())
+        );
+    }
+
+    #[test]
+    fn test_initiate_sep31_payment_rejects_blank_sender() {
+        let mut raw = raw_payment();
+        raw.sender = "   ".to_string();
+        assert_eq!(
+            initiate_sep31_payment(raw),
+            Err(Error::invalid_transaction_intent())
+        );
+    }
+
+    #[test]
+    fn test_initiate_sep31_payment_preserves_valid_sender() {
+        let mut raw = raw_payment();
+        raw.sender = "sender-42".to_string();
+        let resp = initiate_sep31_payment(raw).unwrap();
+        assert_eq!(resp.sender, "sender-42");
     }
 
     #[test]
@@ -343,6 +390,14 @@ mod tests {
     fn test_initiate_sep31_payment_normalizes_asset_code() {
         let mut raw = raw_payment();
         raw.asset_code = Some("usdc".to_string());
+        let resp = initiate_sep31_payment(raw).unwrap();
+        assert_eq!(resp.asset_code.as_deref(), Some("USDC"));
+    }
+
+    #[test]
+    fn test_initiate_sep31_payment_normalizes_mixed_case_asset_code() {
+        let mut raw = raw_payment();
+        raw.asset_code = Some("UsDc".to_string());
         let resp = initiate_sep31_payment(raw).unwrap();
         assert_eq!(resp.asset_code.as_deref(), Some("USDC"));
     }
