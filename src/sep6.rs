@@ -571,7 +571,7 @@ fn validate_memo_pair(memo: Option<&str>, memo_type: Option<&str>) -> Result<(),
 /// assert_eq!(resp.asset_code, Some("USDC".into()));
 /// ```
 pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Error> {
-    if raw.transaction_id.is_empty() || raw.how.is_empty() {
+    if raw.transaction_id.trim().is_empty() || raw.how.is_empty() {
         return Err(Error::invalid_transaction_intent());
     }
     if let (Some(min), Some(max)) = (raw.min_amount, raw.max_amount) {
@@ -650,7 +650,7 @@ pub fn initiate_deposit(raw: RawDepositResponse) -> Result<DepositResponse, Erro
 /// assert_eq!(resp.status, TransactionStatus::PendingUser);
 /// ```
 pub fn initiate_withdrawal(raw: RawWithdrawalResponse) -> Result<WithdrawalResponse, Error> {
-    if raw.transaction_id.is_empty() || raw.account_id.is_empty() {
+    if raw.transaction_id.trim().is_empty() || raw.account_id.is_empty() {
         return Err(Error::invalid_transaction_intent());
     }
     if let (Some(min), Some(max)) = (raw.min_amount, raw.max_amount) {
@@ -723,7 +723,7 @@ pub fn initiate_withdrawal(raw: RawWithdrawalResponse) -> Result<WithdrawalRespo
 pub fn fetch_transaction_status(
     raw: RawTransactionResponse,
 ) -> Result<TransactionStatusResponse, Error> {
-    if raw.transaction_id.is_empty() {
+    if raw.transaction_id.trim().is_empty() {
         return Err(Error::invalid_transaction_intent());
     }
 
@@ -792,7 +792,7 @@ pub fn list_transactions(
 ) -> alloc::vec::Vec<TransactionStatusResponse> {
     raw_list
         .into_iter()
-        .filter(|r| !r.transaction_id.is_empty())
+        .filter(|r| !r.transaction_id.trim().is_empty())
         .map(|r| TransactionStatusResponse {
             transaction_id: r.transaction_id,
             kind: r
@@ -968,6 +968,13 @@ mod tests {
     }
 
     #[test]
+    fn test_initiate_deposit_blank_transaction_id_rejected() {
+        let mut raw = raw_deposit();
+        raw.transaction_id = "   ".to_string();
+        assert_eq!(initiate_deposit(raw), Err(Error::invalid_transaction_intent()));
+    }
+
+    #[test]
     fn test_initiate_deposit_defaults_status_to_pending() {
         let mut raw = raw_deposit();
         raw.status = None;
@@ -994,6 +1001,16 @@ mod tests {
     }
 
     #[test]
+    fn test_initiate_withdrawal_blank_transaction_id_rejected() {
+        let mut raw = raw_withdrawal();
+        raw.transaction_id = "   ".to_string();
+        assert_eq!(
+            initiate_withdrawal(raw),
+            Err(Error::invalid_transaction_intent())
+        );
+    }
+
+    #[test]
     fn test_fetch_transaction_status_normalizes_response() {
         let resp = fetch_transaction_status(raw_tx_status()).unwrap();
         assert_eq!(resp.status, TransactionStatus::Completed);
@@ -1005,6 +1022,16 @@ mod tests {
     fn test_fetch_transaction_status_missing_id_returns_error() {
         let mut raw = raw_tx_status();
         raw.transaction_id = "".to_string();
+        assert_eq!(
+            fetch_transaction_status(raw),
+            Err(Error::invalid_transaction_intent())
+        );
+    }
+
+    #[test]
+    fn test_fetch_transaction_status_blank_id_returns_error() {
+        let mut raw = raw_tx_status();
+        raw.transaction_id = "   ".to_string();
         assert_eq!(
             fetch_transaction_status(raw),
             Err(Error::invalid_transaction_intent())

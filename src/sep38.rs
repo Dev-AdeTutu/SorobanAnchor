@@ -381,7 +381,7 @@ fn validate_quote_fields_with_threshold(
     near_stale_threshold_seconds: u64,
 ) -> Result<(u64, QuoteFreshness), Error> {
     // Validate ID
-    if raw.id.is_empty() {
+    if raw.id.trim().is_empty() {
         return Err(Error::invalid_quote());
     }
     
@@ -417,11 +417,14 @@ fn validate_quote_fields_with_threshold(
         return Err(Error::invalid_quote());
     }
     
-    // Validate asset codes are not empty
-    if raw.sell_asset.is_empty() || raw.buy_asset.is_empty() {
+    // Validate asset codes are not empty and are not the same asset
+    if raw.sell_asset.trim().is_empty() || raw.buy_asset.trim().is_empty() {
         return Err(Error::invalid_quote());
     }
-    
+    if raw.sell_asset.trim().eq_ignore_ascii_case(raw.buy_asset.trim()) {
+        return Err(Error::invalid_quote());
+    }
+
     Ok((expires_at, freshness))
 }
 
@@ -1920,6 +1923,49 @@ mod tests {
         let mut raw = valid_raw("2000");
         raw.buy_asset = "".to_string();
         assert!(validate_quote_fields_with_threshold(&raw, now, 60).is_err());
+    }
+
+    #[test]
+    fn test_validate_quote_fields_with_threshold_blank_id_rejected() {
+        let mut raw = valid_raw("2000");
+        raw.id = "   ".to_string();
+        let now = 1000;
+        assert_eq!(
+            validate_quote_fields_with_threshold(&raw, now, 60).unwrap_err().code,
+            crate::errors::ErrorCode::InvalidQuote
+        );
+    }
+
+    #[test]
+    fn test_identical_asset_pair_rejected() {
+        let mut raw = valid_raw("2000");
+        raw.sell_asset = "XLM".to_string();
+        raw.buy_asset = "XLM".to_string();
+        let err = request_firm_quote(raw, 1000).unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::InvalidQuote);
+    }
+
+    #[test]
+    fn test_identical_asset_pair_case_insensitive_rejected() {
+        let mut raw = valid_raw("2000");
+        raw.sell_asset = "xlm".to_string();
+        raw.buy_asset = "XLM".to_string();
+        let err = request_firm_quote(raw, 1000).unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::InvalidQuote);
+    }
+
+    #[test]
+    fn test_distinct_asset_pair_accepted() {
+        let raw = valid_raw("2000");
+        assert!(request_firm_quote(raw, 1000).is_ok());
+    }
+
+    #[test]
+    fn test_inverted_expiry_rejected() {
+        // expires_at is far earlier than current_timestamp (creation time).
+        let raw = valid_raw("1");
+        let err = request_firm_quote(raw, 100_000).unwrap_err();
+        assert_eq!(err.code, crate::errors::ErrorCode::StaleQuote);
     }
 
     #[test]
