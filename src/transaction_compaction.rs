@@ -285,11 +285,11 @@ pub fn compact_history(
         }
 
         let (completed, pending, error) = classify_status(&rec.status);
-        if completed { completed_count += 1; }
-        if pending { pending_count += 1; }
-        if error { error_count += 1; }
+        if completed { completed_count = completed_count.saturating_add(1); }
+        if pending { pending_count = pending_count.saturating_add(1); }
+        if error { error_count = error_count.saturating_add(1); }
 
-        total_count += 1;
+        total_count = total_count.saturating_add(1);
         total_volume = total_volume.saturating_add(rec.amount);
         if rec.amount > max_amount { max_amount = rec.amount; }
         if rec.amount < min_amount { min_amount = rec.amount; }
@@ -476,6 +476,30 @@ mod tests {
         let result = compact_history(&records, &cfg).unwrap();
         assert_eq!(result.aggregate.earliest_timestamp, 1000);
         assert_eq!(result.aggregate.latest_timestamp, 5000);
+    }
+
+    // --- #866: empty batch creates no summary ---
+
+    #[test]
+    fn empty_batch_creates_no_summary() {
+        let cfg = CompactionConfig::default();
+        let result = compact_history(&[], &cfg).unwrap();
+        assert!(result.windows.is_empty());
+        assert_eq!(result.aggregate.window_count, 0);
+        assert_eq!(result.aggregate.total_count, 0);
+    }
+
+    // --- #867: large batch count does not overflow ---
+
+    #[test]
+    fn large_batch_count_does_not_overflow() {
+        let records: Vec<RawTransactionRecord> = (0u64..1000)
+            .map(|i| rec(&alloc::format!("t{}", i), i * 10, "completed", 1))
+            .collect();
+        let cfg = CompactionConfig { window_seconds: 1_000_000, retain_boundary_ids: false };
+        let result = compact_history(&records, &cfg).unwrap();
+        assert_eq!(result.windows[0].total_count, 1000);
+        assert_eq!(result.aggregate.total_count, 1000);
     }
 
     #[test]
