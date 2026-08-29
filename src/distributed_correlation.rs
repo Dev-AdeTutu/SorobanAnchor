@@ -189,6 +189,12 @@ impl CorrelationContext {
         self.baggage.get(key).map(String::as_str)
     }
 
+    pub fn add_correlation_link(&mut self, links: &mut Vec<String>) {
+    if !links.iter().any(|id| id == &self.correlation_id) {
+        links.push(self.correlation_id.clone());
+    }
+}
+
     // ── Mutation ───────────────────────────────────────────────────────────
 
     /// Add or overwrite a baggage entry.
@@ -444,6 +450,26 @@ mod tests {
             CorrelationContext::with_id("svc", bad),
             Err(CorrelationError::InvalidCorrelationId(_))
         ));
+    }
+
+        #[test]
+    fn duplicate_correlation_link_is_ignored() {
+        let ctx = CorrelationContext::new("svc", "txn-001");
+        let other = CorrelationContext::new("svc", "txn-002");
+
+        let mut links = Vec::new();
+
+        ctx.add_correlation_link(&mut links);
+        ctx.add_correlation_link(&mut links);
+        other.add_correlation_link(&mut links);
+
+        assert_eq!(
+            links,
+            vec![
+                ctx.correlation_id().to_string(),
+                other.correlation_id().to_string(),
+            ]
+        );
     }
 
     #[test]
