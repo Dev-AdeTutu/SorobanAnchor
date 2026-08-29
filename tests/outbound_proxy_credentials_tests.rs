@@ -130,6 +130,39 @@ fn custom_header_credentials_are_injected() {
     );
 }
 
+// ── Transport policy: cleartext HTTP endpoints are rejected (#824) ───────────
+
+#[test]
+fn cleartext_http_endpoint_is_rejected_before_transport() {
+    let opts = OutboundRequestOptions::default().with_bearer_token("sep10-jwt");
+    let mut transport_ran = false;
+    let result = post_with_options(
+        "http://anchor.example.com/webhook",
+        r#"{"event":"deposit_completed"}"#,
+        Some(&opts),
+        |_url, _body, _hdrs| {
+            transport_ran = true;
+            Ok(200u16)
+        },
+    );
+    assert!(result.is_err(), "cleartext http:// endpoint must be rejected");
+    assert!(
+        !transport_ran,
+        "the request must be rejected before any transport/network activity"
+    );
+}
+
+#[test]
+fn https_endpoint_is_unchanged_by_the_scheme_guard() {
+    let result = post_with_options(
+        "https://anchor.example.com/webhook",
+        "{}",
+        None,
+        |_url, _body, _hdrs| Ok(204u16),
+    );
+    assert_eq!(result, Ok(204), "https:// endpoints still reach the transport");
+}
+
 // ── Invalid configurations are rejected ──────────────────────────────────────
 
 #[test]
