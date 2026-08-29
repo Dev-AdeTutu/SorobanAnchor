@@ -195,6 +195,16 @@ impl<'a> ProvenanceVerifier<'a> {
     }
 }
 
+fn url_has_credentials(url: &str) -> bool {
+    if let Some(pos) = url.find("://") {
+        let rest = &url[pos + 3..];
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        rest[..authority_end].contains('@')
+    } else {
+        false
+    }
+}
+
 fn check_field(expected: Option<&str>, actual: Option<&str>) -> FieldVerdict {
     match (expected, actual) {
         (None, _) => FieldVerdict::NotChecked,
@@ -237,7 +247,7 @@ impl ProvenanceStore {
     /// # Errors
     ///
     /// Returns [`AnchorKitError`] with [`ErrorCode::ValidationError`] when
-    /// `artifact_name` or `content_hash` is empty.
+    /// `artifact_name` or `content_hash` is empty or malformed.
     pub fn record(
         &mut self,
         artifact_name: String,
@@ -249,6 +259,9 @@ impl ProvenanceStore {
         }
         if content_hash.is_empty() {
             return Err(AnchorKitError::validation_error("content_hash must not be empty"));
+        }
+        if content_hash.chars().any(|c| c.is_ascii_whitespace()) {
+            return Err(AnchorKitError::validation_error("content_hash must not contain whitespace"));
         }
 
         let provenance = ArtifactProvenance {
@@ -281,6 +294,14 @@ impl ProvenanceStore {
         build_env: Option<Vec<(String, String)>>,
         signature: Option<String>,
     ) -> Result<(), AnchorKitError> {
+        if let Some(ref repo) = source_repository {
+            if url_has_credentials(repo) {
+                return Err(AnchorKitError::validation_error(
+                    "source_repository must not contain URL credentials",
+                ));
+            }
+        }
+
         let record = self
             .records
             .iter_mut()
@@ -470,6 +491,57 @@ mod tests {
             .verify();
         assert!(!report.passed);
         assert_eq!(report.source_revision, FieldVerdict::Missing);
+    }
+
+    // --- #868: malformed digest ---
+
+    #[test]
+    fn record_malformed_hash_rejected() {
+        let mut store = ProvenanceStore::new();
+        let err = store
+            .record("artifact.wasm".into(), "   ".into(), 0)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError);
+    }
+
+    // --- #869: credential-bearing source URL ---
+
+    #[test]
+    fn update_source_repository_with_credentials_rejected() {
+        let mut store = ProvenanceStore::new();
+        store.record("a.wasm".into(), "h1".into(), 0).unwrap();
+        let err = store
+            .update(
+                0,
+                None,
+                Some("https://user:pass@github.com/org/repo".into()),
+                None,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValidationError);
+    }
+
+    #[test]
+    fn update_ordinary_source_repository_accepted() {
+        let mut store = ProvenanceStore::new();
+        store.record("a.wasm".into(), "h1".into(), 0).unwrap();
+        store
+            .update(
+                0,
+                None,
+                Some("https://github.com/org/repo".into()),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let p = store.get_by_id(0).unwrap();
+        assert_eq!(
+            p.source_repository.as_deref(),
+            Some("https://github.com/org/repo")
+        );
     }
 
     #[test]
